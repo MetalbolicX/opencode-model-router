@@ -77,23 +77,37 @@ the perfect carrier for the **forcing message**. This is exactly the reference
   `return { tool: { <name>: <builtTool> } }`. **This is the construction the real `delegate` tool will
   reuse in Wave 2.**
 
-### Capability C — subagent interception: **CONFIRMED for the event stream; child-correlation deferred**
+### Capability C — subagent interception: **CONFIRMED (empirical, Run 2)**
 
-- The `event` hook fired for **12 distinct event types** in a single simple run, including the ones the
-  artefact contract needs:
-  - `message.updated` (carries the assistant `Message` → final return text),
-  - `message.part.updated` / `message.part.delta` (carry `ToolPart` with `state.output` → a session's
-    tool calls + outputs; `message.part.delta` is the only event exposing a non-null `messageID`),
-  - `session.created`, `session.idle`, `session.status`, `session.diff`.
-- `event.properties.sessionID` is populated on all session/message events (null only on global
-  `tui.toast.show` / `server.instance.disposed`).
-- **`parentID` was `null` on every event** — but this run **did not spawn a subagent**, so there was no
-  child session to carry one. The field exists in the typings
-  (`EventSessionCreated.parentID?`, `AssistantMessage.parentID`). **Parent/child correlation for a real
-  `Task()` child is therefore typed-but-not-yet-exercised.**
-- Independently, `tool.execute.before` / `after` fired with the session's `sessionID`, so the
-  **enforcement point fires per-session** — which is what Layer 1 needs (it keys off the existing
-  `subagentSessionIDs` detection, not off `parentID`).
+**Run 1** (no subagent) confirmed the event stream is observable: the `event` hook fired for **12
+distinct event types** including the ones the artefact contract needs — `message.updated` (assistant
+`Message` → final text), `message.part.updated` / `message.part.delta` (carry `ToolPart` with
+`state.output`), `session.created`/`idle`/`status`/`diff`. `event.properties.sessionID` is populated on
+all session/message events (null only on global `tui.toast.show` / `server.instance.disposed`).
+
+**Run 2** (orchestrator spawns a real `Task(subagent_type="fast")` child) closed the remaining gap:
+
+- **Two distinct sessions** appeared: orchestrator `ses_…AOR` and child `ses_…NsEf`.
+- **Child correlation works — but the field path matters:** `parentID` is at
+  **`event.properties.info.parentID`** (present on the child's `session.created`), **NOT** at
+  `event.properties.parentID` (which is always null). The child's `info.parentID` equalled the
+  orchestrator's session id. *Run 1's null `parentID` was an extractor bug (wrong path), not an SDK
+  limitation.* **Implementation note for Wave 2: read `properties.info.parentID` on `session.created`.**
+- **The before-hook fires INSIDE the child session:** `{ev:"before", tool:"probe_echo",
+  sessionID:"ses_…NsEf"}` — a different sessionID than the orchestrator, and the custom tool's
+  `execute` ran in the child (`echo_execute value=child-ran`). So Layer 1's enforcement point applies to
+  subagent sessions, keyed off `sessionID` (consistent with the existing `subagentSessionIDs` detection).
+  The plugin factory ran **once** (`factory_called` logged once) and served both sessions.
+- **The built-in `task` tool is itself interceptable (key Layer-2 finding):** the orchestrator's
+  `Task()` dispatch surfaced as `{ev:"before", tool:"task", sessionID:<orchestrator>}`, and the `task`
+  tool's **result record** (in `tool.execute.after`) contained the subagent's **final return**
+  wrapped as `<task_result>DONE.</task_result>` plus
+  `metadata: { parentSessionId:<orchestrator>, sessionId:<child> }`.
+
+**Implication:** Layer 2 can capture a delegation's **finalReturnText directly from the `task` tool's
+`tool.execute.after` output** (no event-stream reassembly required), and attribute **changedFiles** to
+the child via that child sessionID's edit/write calls in `tool.execute.after`. This is a robust,
+concurrency-safe artefact source and strengthens Option (ii).
 
 ## The artefact contract (§3.3) — what is achievable
 
@@ -122,18 +136,21 @@ files can only be **checker-graded on the returned text**. Acceptable and docume
    - Layer 3 (escalation) — **buildable** (pure policy; composes on top of the gate).
 3. **Open Q1 is NOT triggered.** Q1 only fires if **both** B and C are absent; B is confirmed, so we do
    **not** stop to escalate. We proceed building Option (ii).
-4. **GA-8** is satisfied for A and B now; the C **child-session** facet is satisfied at the typings
-   level and **must be re-confirmed empirically in the Wave-2 smoke** (see below).
+4. **GA-8** is satisfied for **A, B, and C** now (A/B in Run 1, C in Run 2). Each later layer still runs
+   its own real-OpenCode smoke (M1) to re-confirm against any version drift.
 
 ## Consequences / follow-ups (carried into later phases)
 
-- **W2 smoke (must spawn a real subagent):** confirm (a) `parentID` populates for a `Task()` child so
-  orchestrator-vs-subagent sessions are distinguishable via events, and (b) whether the plugin factory's
-  injected **`client`** (the OpenCode SDK client) can `session.create` + `prompt` + await a child result
-  so the `delegate` tool can **produce → gate → return accepted-only** internally. If `client` cannot
-  spawn/await, Option (ii) degrades to "delegate tool wraps the *gate* around an
-  orchestrator-driven `Task()`" (still owns verify/accept, just not the spawn). Either way the gate is
-  plugin-owned. **Not blocking.**
+- **Layer-2 artefact capture (recommended mechanism, from Run 2):** intercept the built-in **`task`
+  tool** — its `tool.execute.after` output carries the subagent's final return + `metadata.sessionId`/
+  `parentSessionId`; attribute changed files via the child sessionID's edit/write calls. Use
+  `session.created.properties.info.parentID` to map child→parent. This does **not** require a custom
+  tool, so Option (i) and Option (ii) share the same capture path.
+- **W2 open item (non-blocking):** confirm whether the plugin factory's injected **`client`** (OpenCode
+  SDK client) can `session.create` + `prompt` + await a child result so a custom `delegate` tool can
+  **produce → gate → return accepted-only** in a single tool call. If `client` cannot spawn/await,
+  Option (ii) degrades to "the gate wraps the `task`-tool result" (still fully plugin-owned verify/accept,
+  just not an in-tool spawn). Either way the gate is plugin-owned.
 - **Throw-message contract (Layer 1):** the thrown `Error.message` IS the model-visible observation;
   keep it secret-free (§5.5) and end it with the forcing message.
 - **Re-spike trigger (R10):** if `opencode --version` or the bundled plugin SDK changes before Wave 1

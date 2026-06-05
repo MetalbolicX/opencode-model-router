@@ -84,13 +84,19 @@ export const ProbePlugin = async () => {
     event: async ({ event }) => {
       try {
         const props = event?.properties ?? {};
-        appendLog({
+        const entry = {
           ev: "event",
           type: event?.type,
           sessionID: props?.sessionID ?? null,
           parentID: props?.parentID ?? null,
           messageID: props?.messageID ?? null,
-        });
+        };
+        if (event?.type === "session.created") {
+          try {
+            entry.raw = JSON.stringify(props).slice(0, 300);
+          } catch { /* best-effort */ }
+        }
+        appendLog(entry);
       } catch {
         /* best-effort */
       }
