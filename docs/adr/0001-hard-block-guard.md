@@ -72,11 +72,13 @@ BASH_C_RE            = /\bbash\s+-c\b/i
 ```
 
 `isSelfScript(call, policy)`:
-1. If a WRITE tool targets a path matching `SCRIPT_EXT_RE` → candidate.
-2. If `bash`/`shell` command matches any of HEREDOC/REDIRECT/INLINE/CAT_WRITE/BASH_C → candidate.
-3. **Intent exemption (NEW, generalises §5.5):** a candidate is **allowed** (returns `false`) when the policy says the declared deliverable *is* a script — i.e. `policy.deliverableIsScript === true`, or the written path equals/*matches* `policy.deliverablePath`. A task whose job is to write `build.sh` or a codegen `*.mjs` must not be blocked.
+1. **Intent exemption FIRST (NEW, generalises §5.5):** return `false` when the policy says the declared deliverable *is* a script — i.e. `policy.deliverableIsScript === true`, or the written path equals `policy.deliverablePath`. A task whose job is to write `build.sh` or a codegen `*.mjs` must not be blocked.
+2. **`bash`/`shell` ad-hoc execution (the DEFAULT self-script signal):** command matches any of HEREDOC/REDIRECT/INLINE/CAT_WRITE/BASH_C → `true`. This is the generalisable anti-sidestep signal — a weak model that writes a heredoc/`node -e`/`bash -c` blob *instead of* using the real tools.
+3. **WRITE tool to a script-extension file → only when opted in.** A WRITE/EDIT/PATCH/MULTIEDIT to a path matching `SCRIPT_EXT_RE` is flagged `true` **only if `policy.blockScriptWrites === true`** (default **false**/absent). 
 
-So self-script detection keys off **intent from the DoD/task**, not just the file extension.
+> **CRITICAL CORRECTION (Phase 1.1 QA).** The reference treated writing `.ts`/`.js`/`.mjs`/`.py` as a self-script because its only legitimate deliverable was an on-chain op — code-writing was always a sidestep. **In a general-coding router that logic is inverted: writing source files (`.ts`, `.js`, `.py`, …) IS the normal deliverable and must never be blocked by default.** Therefore the extension-based WRITE rule is **off by default** and exists only as an opt-in for users who explicitly want to forbid subagents from authoring shell scripts. The always-on default self-script signal is the **bash ad-hoc execution** bank (clause 2), which does not fire on ordinary file writes or on legitimate commands like `npm test` / `tsc`.
+
+So self-script detection keys off **intent from the DoD/task and ad-hoc-execution shape**, not the file extension of a normal write.
 
 ### 2.5 Throw-message contract (Phase 1.2 consumes this)
 
@@ -140,6 +142,7 @@ The guard engine itself is pure and mode-agnostic; the mode only governs whether
 - **O1 — redundant re-read after a write.** A model that writes `foo.ts` then re-reads `foo.ts` to verify produces an identical `read:foo.ts` fingerprint. With `sameOpRetryCap=1` the 2nd read is blocked. **Default decision:** acceptable — the forcing message tells it to proceed to a producing action or finish; verification belongs to Layer 2, not the subagent re-reading. If field data shows this is too aggressive, raise `sameOpRetryCap` or reset `seen[fp]` on an intervening mutation. Documented, not pre-optimised.
 - **O2 — `bash` that is a legit build/test command** (`npm test`, `tsc`) must classify as **mutation/other-allowed**, not self_script. The regex bank only flags inline-script / heredoc / `bash -c` / cat-write / redirect-to-script patterns, so `npm test` is safe. Covered by a Phase 1.1 edge test.
 - **O3 — `multiedit`/`patch` extensions.** Treat `multiedit` as a write tool for self-script purposes. Covered in §2.2/§2.4.
+- **O4 — writing source files must not be self-script (RESOLVED, Phase 1.1 QA).** Writing `.ts`/`.js`/`.py`/etc. is the normal coding deliverable. The extension-based WRITE rule is therefore **off by default** (`policy.blockScriptWrites`, default `false`); the always-on default self-script signal is the bash ad-hoc-execution bank only. See §2.4 CRITICAL CORRECTION. Without this, enforced mode would block ordinary code authoring.
 
 ## 5. Test obligations handed to Phase 1.1
 
