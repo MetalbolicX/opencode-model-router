@@ -500,6 +500,13 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
 
               const model = tierModel(activeCfg, tier) ?? undefined;
               producerText = "";
+              // Provider-failover vs quality-escalation precedence (Phase 3.3):
+              // Provider-failover is advisory only — a text chain injected into the orchestrator
+              // system prompt (buildFallbackInstructions). It is orthogonal to this runtime ladder.
+              // A transport/API error here is caught, yields an empty artefact, and is treated as
+              // exactly ONE failed attempt by the quality-escalation ladder (no provider swap, no
+              // double-counted attempt). API error => (advisory) provider failover; verification
+              // FAIL => (runtime) quality escalation.
               try {
                 const res: any = await ctx.client.session.prompt({
                   path: { id: producerSid },
