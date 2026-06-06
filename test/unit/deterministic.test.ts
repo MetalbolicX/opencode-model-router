@@ -241,6 +241,47 @@ describe("isCommandAllowed + allowlist gate", () => {
     expect(verdict.reasons[0]).toContain("not allowlisted");
     expect(execCalled).toBe(false);
   });
+
+  // H1: inline-eval flag blocking
+  it("blocks node -e (inline eval)", () => {
+    expect(isCommandAllowed(`node -e "console.log(1)"`, DEFAULT_ALLOWLIST)).toBe(false);
+  });
+
+  it("blocks node --eval", () => {
+    expect(isCommandAllowed(`node --eval "1"`, DEFAULT_ALLOWLIST)).toBe(false);
+  });
+
+  it("blocks node -p (inline print)", () => {
+    expect(isCommandAllowed(`node -p "1"`, DEFAULT_ALLOWLIST)).toBe(false);
+  });
+
+  it("blocks bun -e", () => {
+    expect(isCommandAllowed("bun -e x", DEFAULT_ALLOWLIST)).toBe(false);
+  });
+
+  it("blocks tsx -e", () => {
+    expect(isCommandAllowed("tsx -e x", DEFAULT_ALLOWLIST)).toBe(false);
+  });
+
+  it("allows node script.js (no eval flag)", () => {
+    expect(isCommandAllowed("node script.js", DEFAULT_ALLOWLIST)).toBe(true);
+  });
+
+  it("allows tsc -p tsconfig.json (tsc is not an interpreter)", () => {
+    expect(isCommandAllowed("tsc -p tsconfig.json", DEFAULT_ALLOWLIST)).toBe(true);
+  });
+
+  it("allows eslint -c .eslintrc.json (eslint is not an interpreter)", () => {
+    expect(isCommandAllowed("eslint -c .eslintrc.json", DEFAULT_ALLOWLIST)).toBe(true);
+  });
+
+  it("allows npm test", () => {
+    expect(isCommandAllowed("npm test", DEFAULT_ALLOWLIST)).toBe(true);
+  });
+
+  it("blocks python3 -c with extended allowlist", () => {
+    expect(isCommandAllowed(`python3 -c "x"`, [...DEFAULT_ALLOWLIST, "python3"])).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

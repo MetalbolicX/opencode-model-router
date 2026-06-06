@@ -365,21 +365,25 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
     const sid: string | undefined = created?.data?.id;
     if (!sid) return { sessionID: "", text: "" };
     graderSessions.add(sid);
-    const model = tierModel(cfg, req.tier) ?? undefined;
-    const res: any = await ctx.client.session.prompt({
-      path: { id: sid },
-      body: {
-        ...(model ? { model } : {}),
-        system: req.system,
-        parts: [{ type: "text", text: req.prompt }],
-      },
-    });
-    const parts: any[] = res?.data?.parts ?? [];
-    const text = parts
-      .filter((p) => p?.type === "text" && typeof p.text === "string")
-      .map((p) => p.text)
-      .join("\n");
-    return { sessionID: sid, text };
+    try {
+      const model = tierModel(cfg, req.tier) ?? undefined;
+      const res: any = await ctx.client.session.prompt({
+        path: { id: sid },
+        body: {
+          ...(model ? { model } : {}),
+          system: req.system,
+          parts: [{ type: "text", text: req.prompt }],
+        },
+      });
+      const parts: any[] = res?.data?.parts ?? [];
+      const text = parts
+        .filter((p) => p?.type === "text" && typeof p.text === "string")
+        .map((p) => p.text)
+        .join("\n");
+      return { sessionID: sid, text };
+    } finally {
+      graderSessions.delete(sid);
+    }
   };
   const buildGateDeps = () => ({
     deterministic: {

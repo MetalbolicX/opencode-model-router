@@ -36,13 +36,30 @@ export const DEFAULT_ALLOWLIST = [
 // eslint-disable-next-line no-useless-escape
 export const FORBIDDEN_SHELL = /[;&|`$><\n]|\$\(|&&|\|\|/;
 
+// Interpreters that can execute arbitrary inline code via a flag. An allowlisted
+// interpreter must not be turned into an arbitrary-code runner (e.g. `node -e ...`).
+const INTERPRETERS = new Set([
+  "node", "deno", "bun", "tsx", "ts-node", "python", "python3", "ruby", "perl",
+]);
+// Inline-eval / inline-print flags: -e, -c, -p, --eval, --print (with optional =value).
+const EVAL_FLAG_RE = /^-(e|c|p)$|^--(eval|print)(=|$)/i;
+
 export function isCommandAllowed(command: string, allowlist: string[]): boolean {
   const trimmed = command.trim();
   if (!trimmed || FORBIDDEN_SHELL.test(command)) return false;
-  const firstToken = trimmed.split(/\s+/)[0];
+  const tokens = trimmed.split(/\s+/);
+  const firstToken = tokens[0];
   const parts = firstToken.split(/[/\\]/);
   const basename = parts[parts.length - 1];
-  return allowlist.includes(basename);
+  if (!allowlist.includes(basename)) return false;
+  // Strip a Windows executable suffix before the interpreter check.
+  const interpreterBase = basename.replace(/\.(exe|cmd|bat)$/i, "");
+  if (INTERPRETERS.has(interpreterBase)) {
+    for (const t of tokens.slice(1)) {
+      if (EVAL_FLAG_RE.test(t)) return false;
+    }
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
