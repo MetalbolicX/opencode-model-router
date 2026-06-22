@@ -2,7 +2,6 @@ import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 
 // Imports for internal use within this module
 import {
-  loadConfig,
   resolvePresetName,
   writeState,
   invalidateConfigCache,
@@ -24,27 +23,20 @@ import {
 } from "./router/protocol";
 import { resolveEnforcementMode } from "./router/enforcement";
 import {
-  createSessionStore,
   parseCapDirective,
   buildCapBanner,
   DEFAULT_TIER_CAPS,
   READ_ONLY_TOOLS,
 } from "./router/sessions";
 import type { Cap, SubagentState } from "./router/sessions";
-import { createTrajectoryStore } from "./telemetry/trajectory";
-import { createGuardStore } from "./guard/store";
 import { guardBeforeCall, guardAfterCall, formatScorecard } from "./guard/enforce";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, isAbsolute } from "node:path";
-import { exec as nodeExec } from "node:child_process";
-import { access, readFile as fsReadFile } from "node:fs/promises";
+import { join } from "node:path";
 import { tool } from "@opencode-ai/plugin";
 import { scrubText } from "./guard/scrub";
 import { accept } from "./verify/gate";
-import { createMutexRegistry } from "./verify/deterministic";
 import {
-  createChangedFileStore,
   parseTaskResult,
   buildDelegationDoD,
   tierModel,
@@ -60,6 +52,8 @@ import {
   buildPresetOutput,
 } from "./router/commands";
 import { buildAgentOptions } from "./router/agents";
+import { createPluginContext } from "./plugin/context";
+import type { PluginContext } from "./plugin/context";
 
 // ---------------------------------------------------------------------------
 // Re-exports — type-only re-exports for IDE/test consumers.
@@ -79,84 +73,40 @@ export type { GuardPolicy, GuardState, GuardCall, GuardDecision } from "./guard/
 // Plugin
 // ---------------------------------------------------------------------------
 
-const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
-  let cfg = loadConfig();
-  const activeTiers = getActiveTiers(cfg);
+const ModelRouterPlugin: Plugin = async (plugin: PluginInput) => {
+  // Single source of truth for per-plugin runtime state: stores, seams,
+  // mutex, bypass flag, config cache, and grader-session tracking. Hooks
+  // read/write ctx.* instead of closing over plugin-scoped locals.
+  const ctx: PluginContext = createPluginContext(plugin);
+  const {
+    sessionStore,
+    trajectoryStore,
+    guardStore,
+    changedFileStore,
+    graderSessions,
+    verifyMutex,
+    seams,
+  } = ctx;
+  const activeTiers = ctx.activeTiersAtLoad;
 
-  // Per-plugin-instance session store: owns subagentSessionIDs and subagentCapState.
-  const sessionStore = createSessionStore();
+  // Live adapter shorthands (use ctx.seams.* everywhere except these locals).
+  const execSeam = seams.exec;
+  const fsSeam = seams.fs;
 
-  // Per-plugin-instance trajectory store (Phase 0.3 scaffolding — RECORD-ONLY).
-  // Observes subagent tool activity to build a per-session scorecard. It emits
-  // NOTHING into any model-visible output; the only externally observable effect
-  // is an opt-in debug dump gated behind MODEL_ROUTER_TRAJECTORY_DEBUG=1.
-  const trajectoryStore = createTrajectoryStore();
-
-  // Per-plugin-instance guard state (Layer 1 hard-block). Only engaged for
-  // subagent sessions when enforcement mode is advisory/enforced; in "off"
-  // mode no guard state is ever created, so behaviour stays byte-identical.
-  const guardStore = createGuardStore();
-
-  const changedFileStore = createChangedFileStore();
-  const graderSessions = new Set<string>();
-
-  // Layer-2 real adapters (live-only; every call site is fail-closed).
-  const execSeam = (
-    command: string,
-    opts?: { cwd?: string; timeoutMs?: number },
-  ): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> =>
-    new Promise((resolve) => {
-      try {
-        nodeExec(
-          command,
-          {
-            cwd: opts?.cwd ?? ctx.directory,
-            timeout: opts?.timeoutMs ?? 120000,
-            maxBuffer: 10 * 1024 * 1024,
-            windowsHide: true,
-          },
-          (err: any, stdout: any, stderr: any) => {
-            const timedOut = !!(err && err.killed && err.signal === "SIGTERM");
-            const code =
-              err && typeof err.code === "number" ? err.code : err ? 1 : 0;
-            resolve({
-              code,
-              stdout: String(stdout ?? ""),
-              stderr: String(stderr ?? ""),
-              timedOut,
-            });
-          },
-        );
-      } catch {
-        resolve({ code: 1, stdout: "", stderr: "exec failed", timedOut: false });
-      }
-    });
-  const fsSeam = {
-    async fileExists(p: string): Promise<boolean> {
-      try {
-        await access(isAbsolute(p) ? p : join(ctx.directory, p));
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    async readFile(p: string): Promise<string> {
-      return await fsReadFile(isAbsolute(p) ? p : join(ctx.directory, p), "utf-8");
-    },
-  };
-  const verifyMutex = createMutexRegistry();
+  // Per-tier grader dispatcher (Slice 3 will move this into verify/dispatch.ts).
   const dispatchGrader = async (req: {
     tier: string;
     system: string;
     prompt: string;
   }): Promise<{ sessionID: string; text: string }> => {
-    const created: any = await ctx.client.session.create({});
+    const cfg = ctx.getConfig();
+    const created: any = await ctx.plugin.client.session.create({});
     const sid: string | undefined = created?.data?.id;
     if (!sid) return { sessionID: "", text: "" };
     graderSessions.add(sid);
     try {
       const model = tierModel(cfg, req.tier) ?? undefined;
-      const res: any = await ctx.client.session.prompt({
+      const res: any = await ctx.plugin.client.session.prompt({
         path: { id: sid },
         body: {
           ...(model ? { model } : {}),
@@ -174,20 +124,23 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
       graderSessions.delete(sid);
     }
   };
-  const buildGateDeps = () => ({
-    deterministic: {
-      exec: execSeam,
-      fs: fsSeam,
-      cwd: ctx.directory,
-      mutex: verifyMutex,
-    },
-    checker: {
-      dispatchGrader,
-      ladder: ["fast", "medium", "heavy"],
-      minGraderTier: cfg.enforcement?.verify?.minGraderTier ?? null,
-    },
-    require: cfg.enforcement?.verify?.require,
-  });
+  const buildGateDeps = () => {
+    const cfg = ctx.getConfig();
+    return {
+      deterministic: {
+        exec: execSeam,
+        fs: fsSeam,
+        cwd: ctx.plugin.directory,
+        mutex: verifyMutex,
+      },
+      checker: {
+        dispatchGrader,
+        ladder: ["fast", "medium", "heavy"],
+        minGraderTier: cfg.enforcement?.verify?.minGraderTier ?? null,
+      },
+      require: cfg.enforcement?.verify?.require,
+    };
+  };
 
   // Best-effort, secret-free delegate scorecard dump (counts only).
   const dumpDelegateScorecard = (
@@ -208,11 +161,12 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
 
   // Bypass mode: when true, the router skips all system prompt injection,
   // subagent tracking, cap enforcement, and narration detection for the
-  // current plugin lifetime (i.e., until OpenCode is restarted).
-  let bypassed = false;
+  // current plugin lifetime (i.e., until OpenCode is restarted). The flag
+  // lives on the context so hook adapters can read/write it through ctx.state.
+  // (Initial value is set by createPluginContext.)
 
   const enableDelegateTool =
-    cfg.experimental?.verifiedDelegateTool === true ||
+    ctx.initialConfig.experimental?.verifiedDelegateTool === true ||
     process.env.MODEL_ROUTER_VERIFIED_DELEGATE === "1";
 
   return {
@@ -241,11 +195,11 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
           acceptance?: string;
         }): Promise<string> {
           try {
-            let activeCfg = cfg;
+            let activeCfg = ctx.getConfig();
             try {
-              activeCfg = loadConfig();
+              activeCfg = ctx.refreshConfig();
             } catch {
-              activeCfg = cfg;
+              activeCfg = ctx.getConfig();
             }
             const initialTier =
               typeof args.tier === "string" && args.tier.trim()
@@ -283,7 +237,7 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
                 ? `${scrubText(forcing)}\n\n${args.task}`
                 : args.task;
 
-              const created: any = await ctx.client.session.create({});
+              const created: any = await ctx.plugin.client.session.create({});
               const producerSid: string | undefined = created?.data?.id;
               if (!producerSid) {
                 return "[router] delegate failed: could not create a producer session.";
@@ -305,7 +259,7 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
               // double-counted attempt). API error => (advisory) provider failover; verification
               // FAIL => (runtime) quality escalation.
               try {
-                const res: any = await ctx.client.session.prompt({
+                const res: any = await ctx.plugin.client.session.prompt({
                   path: { id: producerSid },
                   body: {
                     ...(model ? { model } : {}),
@@ -430,7 +384,7 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
     "chat.params": async (input: any, output: any) => {
       try {
         if (input?.sessionID && graderSessions.has(input.sessionID)) {
-          output.temperature = cfg.enforcement?.verify?.graderTemperature ?? 0;
+          output.temperature = ctx.getConfig().enforcement?.verify?.graderTemperature ?? 0;
         }
       } catch {
         // best-effort: never crash a real session
@@ -438,11 +392,14 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
     },
 
     "chat.message": async (input: any, output: any) => {
-      if (bypassed) return;
+      if (ctx.state.bypassed) return;
       // Re-read cfg so /preset switches take effect without restart
+      let cfg = ctx.getConfig();
       try {
-        cfg = loadConfig();
-      } catch {}
+        cfg = ctx.refreshConfig();
+      } catch {
+        // keep last known cfg if file read fails
+      }
       const tierNames = Object.keys(getActiveTiers(cfg));
       sessionStore.registerFromChatMessage(input, output, cfg, tierNames);
 
@@ -460,7 +417,7 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
     // non-subagent sessions or when enforcement is off (GA-1 preserved).
     // -----------------------------------------------------------------------
     "tool.execute.before": async (input: any, output: any) => {
-      if (bypassed) return;
+      if (ctx.state.bypassed) return;
       const sid = input?.sessionID;
       if (!sid || !sessionStore.isSubagent(sid) || typeof input?.tool !== "string") {
         return;
@@ -468,7 +425,7 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
       let res;
       try {
         res = guardBeforeCall({
-          cfg,
+          cfg: ctx.getConfig(),
           tier: sessionStore.getTier(sid),
           trivial: sessionStore.isTrivial(sid),
           sessionID: sid,
@@ -499,7 +456,7 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
     // treats them as ground truth rather than advisory system noise.
     // -----------------------------------------------------------------------
     "tool.execute.after": async (input: any, output: any) => {
-      if (bypassed) return;
+      if (ctx.state.bypassed) return;
       sessionStore.recordToolCall(input, output);
 
       // Record-only trajectory observation (mutates internal maps only; never
@@ -518,7 +475,7 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
         });
         try {
           guardAfterCall({
-            cfg,
+            cfg: ctx.getConfig(),
             tier: sessionStore.getTier(sid),
             sessionID: sid,
             tool: input.tool,
@@ -535,13 +492,14 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
       // we observe the finished task result and append a forcing note if it is not
       // accepted; we cannot retry a task call that already finished).
       if (typeof input?.tool === "string") {
+        const activeCfg = ctx.getConfig();
         let mode = "off";
         try {
-          mode = resolveEnforcementMode({ config: cfg, env: process.env }).mode;
+          mode = resolveEnforcementMode({ config: activeCfg, env: process.env }).mode;
         } catch {
           // fall through with mode "off"
         }
-        const requireMode = cfg.enforcement?.verify?.require;
+        const requireMode = activeCfg.enforcement?.verify?.require;
         if (shouldVerifyTask(input.tool, mode, requireMode)) {
           try {
             const { finalReturnText, childSessionID } = parseTaskResult(output);
@@ -571,7 +529,7 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
               buildGateDeps(),
             );
             if (!res.accepted && !res.verdict.skipped) {
-              const ladder = cfg.enforcement?.escalate?.ladder ?? ["fast", "medium", "heavy"];
+              const ladder = activeCfg.enforcement?.escalate?.ladder ?? ["fast", "medium", "heavy"];
               const li = ladder.indexOf(producerTier);
               const nextTier = li >= 0 && li < ladder.length - 1 ? ladder[li + 1] : null;
               const note = scrubText(buildForcingNote(res.verdict.reasons, { producerTier, nextTier }));
@@ -598,7 +556,7 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
     // post-hoc signal.
     // -----------------------------------------------------------------------
     "experimental.text.complete": async (input: any, output: any) => {
-      if (bypassed) return;
+      if (ctx.state.bypassed) return;
       const text = output?.text;
       if (typeof text !== "string" || text.length < 20) return;
 
@@ -654,6 +612,11 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
     // -----------------------------------------------------------------------
     config: async (opencodeConfig: any) => {
       opencodeConfig.agent ??= {};
+
+      // The config() hook runs once at plugin load time, so the load-time
+      // snapshot is the right cfg here (matches the original behaviour where
+      // `cfg` was initialised from loadConfig() once at factory start).
+      const cfg = ctx.initialConfig;
 
       for (const [name, tier] of Object.entries(activeTiers)) {
         // Resolve prompt: per-tier override wins; otherwise fall back to global tierPrompts[name].
@@ -764,9 +727,11 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
     // just execute a task (especially smaller models like Haiku).
     // -----------------------------------------------------------------------
     "experimental.chat.system.transform": async (_input: any, output: any) => {
-      if (bypassed) return;
+      if (ctx.state.bypassed) return;
+      // Returns cache unless invalidated
+      let cfg = ctx.getConfig();
       try {
-        cfg = loadConfig(); // Returns cache unless invalidated
+        cfg = ctx.refreshConfig();
       } catch {
         // Use last known config if file read fails
       }
@@ -793,8 +758,9 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
     // -----------------------------------------------------------------------
     "command.execute.before": async (input: any, output: any) => {
       if (input.command === "tiers") {
+        let cfg = ctx.getConfig();
         try {
-          cfg = loadConfig();
+          cfg = ctx.refreshConfig();
         } catch {}
         output.parts.push({
           type: "text" as const,
@@ -803,8 +769,9 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
       }
 
       if (input.command === "preset") {
+        let cfg = ctx.getConfig();
         try {
-          cfg = loadConfig();
+          cfg = ctx.refreshConfig();
         } catch {}
         output.parts.push({
           type: "text" as const,
@@ -815,14 +782,14 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
       if (input.command === "bypass") {
         const arg = (input.arguments ?? "").trim().toLowerCase();
         if (arg === "on") {
-          bypassed = true;
+          ctx.state.bypassed = true;
         } else if (arg === "off") {
-          bypassed = false;
+          ctx.state.bypassed = false;
         } else {
-          bypassed = !bypassed;
+          ctx.state.bypassed = !ctx.state.bypassed;
         }
-        const status = bypassed ? "ON" : "OFF";
-        const desc = bypassed
+        const status = ctx.state.bypassed ? "ON" : "OFF";
+        const desc = ctx.state.bypassed
           ? "Model-router is **bypassed**. Delegation protocol, cap enforcement, and narration detection are disabled. The model will run without routing rules until you run `/bypass off` or restart OpenCode."
           : "Model-router is **active**. Delegation protocol and all enforcement rules are in effect.";
         output.parts.push({
@@ -832,8 +799,9 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
       }
 
       if (input.command === "budget") {
+        let cfg = ctx.getConfig();
         try {
-          cfg = loadConfig();
+          cfg = ctx.refreshConfig();
         } catch {}
         output.parts.push({
           type: "text" as const,
@@ -842,8 +810,9 @@ const ModelRouterPlugin: Plugin = async (ctx: PluginInput) => {
       }
 
       if (input.command === "router") {
+        let cfg = ctx.getConfig();
         try {
-          cfg = loadConfig();
+          cfg = ctx.refreshConfig();
         } catch {}
         output.parts.push({
           type: "text" as const,
