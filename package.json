@@ -5,6 +5,8 @@
   "type": "module",
   "main": "./src/index.ts",
   "scripts": {
+    "build:tiers": "node --experimental-strip-types scripts/build-tiers-config.ts",
+    "prebuild": "node --experimental-strip-types scripts/build-tiers-config.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
