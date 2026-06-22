@@ -1,13 +1,27 @@
 /**
- * src/verify/dispatch.ts — PURE helpers shared by both Layer-2 wirings
+ * src/verify/dispatch.ts — Layer-2 wiring helpers shared by the two wirings
  * (Option (i) verify-dispatch around the built-in `task` tool, and Option (ii)
- * the plugin-owned `delegate` tool). No fs/network/SDK here; the live adapters
- * (exec/fs/grader) are built in index.ts from PluginInput and injected.
+ * the plugin-owned `delegate` tool).
+ *
+ * Pure section: DoD helpers, task-result parser, model resolver, gate
+ * predicates, and forcing-note / accepted-suffix builders. No fs/network/SDK.
+ *
+ * Adapter section (Slice 3): `dispatchGrader`, `buildGateDeps`, and
+ * `verifyTaskAfterHook` — these read live state from `PluginContext`
+ * (`ctx.getConfig()`, `ctx.seams`, `ctx.verifyMutex`, `ctx.changedFileStore`,
+ * `ctx.sessionStore`, `ctx.graderSessions`) but stay side-effect-free against
+ * the module itself; their only external side-effects are the SDK calls
+ * (`ctx.plugin.client.session.*`) that the original index.ts already made.
  */
 import type { RouterConfig } from "../router/config";
 import { getActiveTiers } from "../router/protocol";
 import { parseDoDFromDispatch, inferDoD } from "./dod";
 import type { DoD, InferHints } from "./dod";
+import type { PluginContext } from "../plugin/context";
+import type { GateDeps } from "./gate";
+import { accept } from "./gate";
+import { resolveEnforcementMode } from "../router/enforcement";
+import { scrubText } from "../guard/scrub";
 
 /** Tools that mutate the workspace (mirrors the guard taxonomy). */
 const WRITE_TOOLS = new Set(["write", "edit", "patch", "multiedit"]);
@@ -159,4 +173,130 @@ export function buildForcingNote(
 /** Suffix appended to an accepted delegate-tool result. */
 export function buildAcceptedSuffix(method: string): string {
   return `\n\n[router \u2713 accepted: ${method}]`;
+}
+
+// ---------------------------------------------------------------------------
+// Adapter functions (Slice 3).
+//
+// These wrap the live runtime state owned by `PluginContext` and the SDK
+// calls made through `ctx.plugin.client.session`. They preserve the exact
+// behavior of the inline closures that previously lived in src/index.ts.
+// ---------------------------------------------------------------------------
+
+/** Per-tier grader dispatcher. Creates a fresh session via the plugin SDK,
+ *  tracks it in `ctx.graderSessions` so the chat.params hook can apply the
+ *  grader temperature override, runs the prompt, and returns the assembled
+ *  text. Failure modes (no session id, SDK throw) collapse to empty result
+ *  — the gate treats grader errors as a fail-closed verdict anyway. */
+export async function dispatchGrader(
+  ctx: PluginContext,
+  req: { tier: string; system: string; prompt: string },
+): Promise<{ sessionID: string; text: string }> {
+  const cfg = ctx.getConfig();
+  const created: any = await ctx.plugin.client.session.create({});
+  const sid: string | undefined = created?.data?.id;
+  if (!sid) return { sessionID: "", text: "" };
+  ctx.graderSessions.add(sid);
+  try {
+    const model = tierModel(cfg, req.tier) ?? undefined;
+    const res: any = await ctx.plugin.client.session.prompt({
+      path: { id: sid },
+      body: {
+        ...(model ? { model } : {}),
+        system: req.system,
+        parts: [{ type: "text", text: req.prompt }],
+      },
+    });
+    const parts: any[] = res?.data?.parts ?? [];
+    const text = parts
+      .filter((p) => p?.type === "text" && typeof p.text === "string")
+      .map((p) => p.text)
+      .join("\n");
+    return { sessionID: sid, text };
+  } finally {
+    ctx.graderSessions.delete(sid);
+  }
+}
+
+/** Assemble `GateDeps` from the live seams and config snapshot. Reads
+ *  `cfg.enforcement?.verify?.require` and `cfg.enforcement?.verify?.minGraderTier`
+ *  at call time so /router switches take effect on the next delegate. */
+export function buildGateDeps(ctx: PluginContext): GateDeps {
+  const cfg = ctx.getConfig();
+  return {
+    deterministic: {
+      exec: ctx.seams.exec,
+      fs: ctx.seams.fs,
+      cwd: ctx.plugin.directory,
+      mutex: ctx.verifyMutex,
+    },
+    checker: {
+      dispatchGrader: (req) => dispatchGrader(ctx, req),
+      ladder: ["fast", "medium", "heavy"],
+      minGraderTier: cfg.enforcement?.verify?.minGraderTier ?? null,
+    },
+    require: cfg.enforcement?.verify?.require,
+  };
+}
+
+/** Adapter for `tool.execute.after`: when a built-in `task` call should be
+ *  verify-dispatched, parse the result, build a DoD, run the gate, and append
+ *  a forcing note to `output.output` on rejection. Fail-closed: any throw is
+ *  swallowed so the after-hook never crashes a real session. */
+export async function verifyTaskAfterHook(
+  ctx: PluginContext,
+  input: any,
+  output: any,
+): Promise<void> {
+  if (typeof input?.tool !== "string") return;
+  const activeCfg = ctx.getConfig();
+  let mode = "off";
+  try {
+    mode = resolveEnforcementMode({ config: activeCfg, env: process.env }).mode;
+  } catch {
+    // fall through with mode "off"
+  }
+  const requireMode = activeCfg.enforcement?.verify?.require;
+  if (!shouldVerifyTask(input.tool, mode, requireMode)) return;
+  try {
+    const { finalReturnText, childSessionID } = parseTaskResult(output);
+    const producerTier =
+      typeof input?.args?.subagent_type === "string"
+        ? input.args.subagent_type
+        : "";
+    const dod = buildDelegationDoD({
+      prompt: input?.args?.prompt,
+      description: input?.args?.description,
+    });
+    const artefact = {
+      changedFiles: childSessionID
+        ? ctx.changedFileStore.get(childSessionID)
+        : [],
+      finalReturnText,
+      declaredOutputs: dod.deliverable ? [dod.deliverable] : [],
+      producerSessionID: childSessionID ?? "",
+      producerTier,
+    };
+    const trivial = childSessionID
+      ? ctx.sessionStore.isTrivial(childSessionID)
+      : false;
+    const res = await accept(
+      { dod, trivial, mode: "modeA" },
+      artefact,
+      buildGateDeps(ctx),
+    );
+    if (!res.accepted && !res.verdict.skipped) {
+      const ladder = activeCfg.enforcement?.escalate?.ladder ?? ["fast", "medium", "heavy"];
+      const li = ladder.indexOf(producerTier);
+      const nextTier = li >= 0 && li < ladder.length - 1 ? ladder[li + 1] : null;
+      const note = scrubText(buildForcingNote(res.verdict.reasons, { producerTier, nextTier }));
+      output.output =
+        typeof output.output === "string"
+          ? output.output + "\n\n" + note
+          : note;
+    }
+    if (childSessionID) ctx.changedFileStore.clear(childSessionID);
+  } catch {
+    // fail-closed: a verification error must NEVER throw out of the after-hook
+  }
 }

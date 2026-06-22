@@ -37,14 +37,21 @@ import { tool } from "@opencode-ai/plugin";
 import { scrubText } from "./guard/scrub";
 import { accept } from "./verify/gate";
 import {
-  parseTaskResult,
   buildDelegationDoD,
   tierModel,
-  shouldVerifyTask,
   buildForcingNote,
   buildAcceptedSuffix,
+  buildGateDeps,
+  verifyTaskAfterHook,
 } from "./verify/dispatch";
-import { newLadderState, recordAttempt, nextAction, advance, buildEscalatePolicy, formatLadderScorecard } from "./escalate/ladder";
+import {
+  newLadderState,
+  recordAttempt,
+  nextAction,
+  advance,
+  buildEscalatePolicy,
+  dumpDelegateScorecard,
+} from "./escalate/ladder";
 import {
   buildRouterOutput,
   buildTiersOutput,
@@ -84,80 +91,12 @@ const ModelRouterPlugin: Plugin = async (plugin: PluginInput) => {
     guardStore,
     changedFileStore,
     graderSessions,
-    verifyMutex,
-    seams,
   } = ctx;
   const activeTiers = ctx.activeTiersAtLoad;
 
-  // Live adapter shorthands (use ctx.seams.* everywhere except these locals).
-  const execSeam = seams.exec;
-  const fsSeam = seams.fs;
-
-  // Per-tier grader dispatcher (Slice 3 will move this into verify/dispatch.ts).
-  const dispatchGrader = async (req: {
-    tier: string;
-    system: string;
-    prompt: string;
-  }): Promise<{ sessionID: string; text: string }> => {
-    const cfg = ctx.getConfig();
-    const created: any = await ctx.plugin.client.session.create({});
-    const sid: string | undefined = created?.data?.id;
-    if (!sid) return { sessionID: "", text: "" };
-    graderSessions.add(sid);
-    try {
-      const model = tierModel(cfg, req.tier) ?? undefined;
-      const res: any = await ctx.plugin.client.session.prompt({
-        path: { id: sid },
-        body: {
-          ...(model ? { model } : {}),
-          system: req.system,
-          parts: [{ type: "text", text: req.prompt }],
-        },
-      });
-      const parts: any[] = res?.data?.parts ?? [];
-      const text = parts
-        .filter((p) => p?.type === "text" && typeof p.text === "string")
-        .map((p) => p.text)
-        .join("\n");
-      return { sessionID: sid, text };
-    } finally {
-      graderSessions.delete(sid);
-    }
-  };
-  const buildGateDeps = () => {
-    const cfg = ctx.getConfig();
-    return {
-      deterministic: {
-        exec: execSeam,
-        fs: fsSeam,
-        cwd: ctx.plugin.directory,
-        mutex: verifyMutex,
-      },
-      checker: {
-        dispatchGrader,
-        ladder: ["fast", "medium", "heavy"],
-        minGraderTier: cfg.enforcement?.verify?.minGraderTier ?? null,
-      },
-      require: cfg.enforcement?.verify?.require,
-    };
-  };
-
-  // Best-effort, secret-free delegate scorecard dump (counts only).
-  const dumpDelegateScorecard = (
-    sid: string,
-    st: Parameters<typeof formatLadderScorecard>[0],
-    accepted: boolean,
-    method: string,
-  ): void => {
-    try {
-      const line = formatLadderScorecard(st, accepted, method);
-      const dir = join(tmpdir(), "opencode-model-router-trajectory");
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, `${sid}.delegate.log`), line + "\n", { flag: "a" });
-    } catch {
-      // best-effort only
-    }
-  };
+  // Slice 3: `dispatchGrader`, `buildGateDeps`, and `dumpDelegateScorecard`
+  // now live in src/verify/dispatch.ts and src/escalate/ladder.ts; the
+  // delegate loop below calls them with the live PluginContext.
 
   // Bypass mode: when true, the router skips all system prompt injection,
   // subagent tracking, cap enforcement, and narration detection for the
@@ -289,7 +228,7 @@ const ModelRouterPlugin: Plugin = async (plugin: PluginInput) => {
                 gateRes = await accept(
                   { dod, trivial: false, mode: "modeA" },
                   artefact,
-                  buildGateDeps(),
+                  buildGateDeps(ctx),
                 );
               } catch {
                 gateRes = {
@@ -491,59 +430,7 @@ const ModelRouterPlugin: Plugin = async (plugin: PluginInput) => {
       // Option (i): verify-dispatch around the built-in `task` tool (advisory-grade —
       // we observe the finished task result and append a forcing note if it is not
       // accepted; we cannot retry a task call that already finished).
-      if (typeof input?.tool === "string") {
-        const activeCfg = ctx.getConfig();
-        let mode = "off";
-        try {
-          mode = resolveEnforcementMode({ config: activeCfg, env: process.env }).mode;
-        } catch {
-          // fall through with mode "off"
-        }
-        const requireMode = activeCfg.enforcement?.verify?.require;
-        if (shouldVerifyTask(input.tool, mode, requireMode)) {
-          try {
-            const { finalReturnText, childSessionID } = parseTaskResult(output);
-            const producerTier =
-              typeof input?.args?.subagent_type === "string"
-                ? input.args.subagent_type
-                : "";
-            const dod = buildDelegationDoD({
-              prompt: input?.args?.prompt,
-              description: input?.args?.description,
-            });
-            const artefact = {
-              changedFiles: childSessionID
-                ? changedFileStore.get(childSessionID)
-                : [],
-              finalReturnText,
-              declaredOutputs: dod.deliverable ? [dod.deliverable] : [],
-              producerSessionID: childSessionID ?? "",
-              producerTier,
-            };
-            const trivial = childSessionID
-              ? sessionStore.isTrivial(childSessionID)
-              : false;
-            const res = await accept(
-              { dod, trivial, mode: "modeA" },
-              artefact,
-              buildGateDeps(),
-            );
-            if (!res.accepted && !res.verdict.skipped) {
-              const ladder = activeCfg.enforcement?.escalate?.ladder ?? ["fast", "medium", "heavy"];
-              const li = ladder.indexOf(producerTier);
-              const nextTier = li >= 0 && li < ladder.length - 1 ? ladder[li + 1] : null;
-              const note = scrubText(buildForcingNote(res.verdict.reasons, { producerTier, nextTier }));
-              output.output =
-                typeof output.output === "string"
-                  ? output.output + "\n\n" + note
-                  : note;
-            }
-            if (childSessionID) changedFileStore.clear(childSessionID);
-          } catch {
-            // fail-closed: a verification error must NEVER throw out of the after-hook
-          }
-        }
-      }
+      await verifyTaskAfterHook(ctx, input, output);
     },
 
     // -----------------------------------------------------------------------

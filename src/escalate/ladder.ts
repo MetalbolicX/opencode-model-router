@@ -1,3 +1,6 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { RouterConfig } from "../router/config";
 
 // ---------------------------------------------------------------------------
@@ -198,4 +201,24 @@ export function formatLadderScorecard(
     `cost=${state.cumulativeCost} | verdict=${accepted ? "PASS" : "UNMET"} | ` +
     `method=${method}]`
   );
+}
+
+/** Append-only temp-file dump for a finished delegation. Writes under
+ *  `<tmpdir>/opencode-model-router-trajectory/<sid>.delegate.log` (same dir
+ *  the event-hook scorecard uses) and never throws — a logging failure must
+ *  never crash a real session. */
+export function dumpDelegateScorecard(
+  sid: string,
+  state: LadderState,
+  accepted: boolean,
+  method: string,
+): void {
+  try {
+    const line = formatLadderScorecard(state, accepted, method);
+    const dir = join(tmpdir(), "opencode-model-router-trajectory");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${sid}.delegate.log`), line + "\n", { flag: "a" });
+  } catch {
+    // best-effort only
+  }
 }
