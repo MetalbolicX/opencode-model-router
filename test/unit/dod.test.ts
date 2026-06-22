@@ -305,10 +305,13 @@ describe("parseDoDFromDispatch", () => {
     expect(result!.kind).toBe("checker");
   });
 
-  it("invalid kind directive value is ignored; kind derived from checks", () => {
+  it("unknown kind directive value fails closed: DoD becomes 'none', checks/criteria dropped (Phase 5)", () => {
     const text = wrap("kind: totally_invalid\ncheck: buildPasses");
     const result = parseDoDFromDispatch(text);
-    expect(result!.kind).toBe("deterministic");
+    expect(result!.kind).toBe("none");
+    expect(result!.checks).toHaveLength(0);
+    expect(result!.criteria).toHaveLength(0);
+    expect(isCheckable(result!)).toBe(false);
   });
 
   it("blank lines inside block are ignored", () => {

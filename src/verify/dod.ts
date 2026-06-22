@@ -127,10 +127,18 @@ export function parseAcceptanceBlock(text: string, source: DoDSource = "explicit
   if (closeIdx === -1) return null;
 
   const innerLines = lines.slice(openIdx + 1, closeIdx);
-  const checks: Check[] = [];
-  const criteria: string[] = [];
+  let checks: Check[] = [];
+  let criteria: string[] = [];
   let deliverable: string | null = null;
   let kindHint: DoDKind | null = null;
+
+  // Tracks whether the user issued an INVALID `kind:` directive value. The
+  // parser fails CLOSED on an unknown kind: the entire block is treated as
+  // ambiguous, all checks/criteria are dropped, and the resulting DoD is
+  // forced to kind:"none". This is a Phase-5 fail-closed semantic — a silent
+  // permissive default would let a typo silently fall back to auto-inference
+  // behavior the user did not ask for.
+  let invalidKindDirective = false;
 
   for (const rawLine of innerLines) {
     const line = rawLine.trim();
@@ -139,6 +147,10 @@ export function parseAcceptanceBlock(text: string, source: DoDSource = "explicit
     const lline = line.toLowerCase();
 
     if (lline.startsWith("check:")) {
+      // Once we know the block is ambiguous (invalid kind:), skip remaining
+      // checks so the fail-closed result stays unambiguous.
+      if (invalidKindDirective) continue;
+
       const rest = line.slice("check:".length).trim();
       const spaceIdx = rest.search(/\s/);
       const kindStr = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx);
@@ -154,17 +166,35 @@ export function parseAcceptanceBlock(text: string, source: DoDSource = "explicit
       if (kvPairs["schema"] !== undefined) check.schema = kvPairs["schema"];
       checks.push(check);
     } else if (lline.startsWith("criteria:")) {
+      if (invalidKindDirective) continue;
       const rest = line.slice("criteria:".length).trim();
       if (rest) criteria.push(rest);
     } else if (lline.startsWith("deliverable:")) {
+      if (invalidKindDirective) continue;
       const rest = line.slice("deliverable:".length).trim();
       deliverable = rest.length > 0 ? rest : null;
     } else if (lline.startsWith("kind:")) {
       const rest = line.slice("kind:".length).trim().toLowerCase();
       if (VALID_DOD_KINDS.has(rest)) {
         kindHint = rest as DoDKind;
+      } else {
+        // Unknown `kind:` value: fail closed. Drop all already-collected
+        // checks/criteria so the resulting DoD is unambiguously not-checkable,
+        // and the gate will apply the no-DoD policy (Phase 5: hard fail-closed).
+        invalidKindDirective = true;
+        checks = [];
+        criteria = [];
+        deliverable = null;
+        kindHint = "none";
       }
     }
+  }
+
+  if (invalidKindDirective) {
+    // Override kindHint explicitly: the user wrote an invalid kind, so the
+    // block resolves to a non-checkable "none" DoD regardless of any other
+    // directive that came before or after.
+    kindHint = "none";
   }
 
   return normalizeDoD({
