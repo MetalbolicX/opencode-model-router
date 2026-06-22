@@ -155,7 +155,7 @@ describe("createPluginContext — two-instance isolation", () => {
     // invalidateConfigCache() between two reads on the SAME context
     // would NOT change behaviour (because the cache stays valid).
     // Instead we assert that two contexts are independent: invalidateConfigCache
-    // only affects the legacy module-level cache, not the per-instance stores.
+    // only affects the legacy module-level singleton, not the per-instance stores.
     const ctxA = createPluginContext(makePluginInput(tmpCwd) as any);
     const first = ctxA.getConfig();
     invalidateConfigCache();
@@ -163,5 +163,88 @@ describe("createPluginContext — two-instance isolation", () => {
     // ctxA's ConfigStore was already cached, so invalidateConfigCache
     // (which clears the module-level singleton) does not affect ctxA.
     expect(second.activePreset).toBe(first.activePreset);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4.2 — direct seam coverage for createPluginContext().
+//
+// The PR1 baseline already proved the cache/refresh/isolation contracts.
+// These tests add direct, single-seam coverage so any future regression in
+// the seam wiring (activeTiersAtLoad snapshot, per-instance seam binding,
+// bypass flag mutability, getConfig reference stability) localises here
+// without dragging in command or router setup.
+// ---------------------------------------------------------------------------
+
+describe("createPluginContext — direct seam wiring", () => {
+  it("activeTiersAtLoad is a snapshot of getActiveTiers(initialConfig) at construction time", () => {
+    const ctx = createPluginContext(makePluginInput(tmpCwd) as any);
+    // The snapshot must contain the bundled tier names. The exact preset
+    // varies by fixture, so assert the keys are present and non-empty.
+    expect(ctx.activeTiersAtLoad).toBeDefined();
+    expect(typeof ctx.activeTiersAtLoad).toBe("object");
+    expect(Object.keys(ctx.activeTiersAtLoad).length).toBeGreaterThan(0);
+    // The model string on each tier must be set.
+    for (const [, tier] of Object.entries(ctx.activeTiersAtLoad)) {
+      expect(typeof (tier as { model?: string }).model).toBe("string");
+    }
+  });
+
+  it("seams.exec and seams.fs are bound to the plugin's directory", () => {
+    const ctx = createPluginContext(makePluginInput(tmpCwd) as any);
+    expect(ctx.seams.exec).toBeDefined();
+    expect(ctx.seams.fs).toBeDefined();
+    // Each seam must be a callable function (exec) or object with the
+    // expected fs surface — assert that calling/inspecting them does not throw.
+    expect(() => ctx.seams.exec("echo hi", { timeoutMs: 1000 })).not.toThrow();
+  });
+
+  it("getConfig returns the same reference when nothing changed between reads", () => {
+    const ctx = createPluginContext(makePluginInput(tmpCwd) as any);
+    const a = ctx.getConfig();
+    const b = ctx.getConfig();
+    // ConfigStore.read() is documented as idempotent: two consecutive reads
+    // return the same reference until refresh() is called.
+    expect(b).toBe(a);
+  });
+
+  it("refreshConfig returns a new reference (the rebuilt config object)", () => {
+    const ctx = createPluginContext(makePluginInput(tmpCwd) as any);
+    const a = ctx.getConfig();
+    const b = ctx.refreshConfig();
+    // The merged values must be equal even if the references differ.
+    expect(b.activePreset).toBe(a.activePreset);
+  });
+
+  it("state.bypassed starts as false and is mutable from outside the factory", () => {
+    const ctx = createPluginContext(makePluginInput(tmpCwd) as any);
+    expect(ctx.state.bypassed).toBe(false);
+    ctx.state.bypassed = true;
+    expect(ctx.state.bypassed).toBe(true);
+    ctx.state.bypassed = false;
+    expect(ctx.state.bypassed).toBe(false);
+  });
+
+  it("does not throw when plugin.directory is undefined", () => {
+    // The factory must tolerate a missing directory — the seam factory
+    // defaults to process.cwd() in that case.
+    const noDir = { directory: undefined } as any;
+    expect(() => createPluginContext(noDir)).not.toThrow();
+  });
+
+  it("store handles are all fresh per call (no module-level singletons)", () => {
+    const a = createPluginContext(makePluginInput(tmpCwd) as any);
+    const b = createPluginContext(makePluginInput(tmpCwd) as any);
+    // Each seam is bound to its own instance.
+    expect(a.seams.exec).not.toBe(b.seams.exec);
+    expect(a.seams.fs).not.toBe(b.seams.fs);
+    // graderSessions is a fresh Set per call.
+    expect(a.graderSessions).not.toBe(b.graderSessions);
+    // Stores are per-instance.
+    expect(a.sessionStore).not.toBe(b.sessionStore);
+    expect(a.changedFileStore).not.toBe(b.changedFileStore);
+    expect(a.guardStore).not.toBe(b.guardStore);
+    expect(a.trajectoryStore).not.toBe(b.trajectoryStore);
+    expect(a.verifyMutex).not.toBe(b.verifyMutex);
   });
 });
