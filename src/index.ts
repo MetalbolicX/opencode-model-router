@@ -1,31 +1,13 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 
 // Imports for internal use within this module
-import {
-  resolvePresetName,
-  writeState,
-  invalidateConfigCache,
-  saveActivePreset,
-  saveActiveMode,
-  saveEnforcementMode,
-} from "./router/config";
-import type { RouterConfig, TierConfig, Preset, ModeConfig } from "./router/config";
-import { fingerprintToolCall } from "./guard/fingerprint";
 import { detectNarration } from "./guard/narration";
 import {
   getActiveTiers,
-  buildDelegationProtocol,
-  isClaudeModel,
-  CLAUDE_TIER_PREFIX,
-  CLAUDE_ORCHESTRATOR_PREFIX,
-  CLAUDE_ANTI_NARRATION,
   assembleSystemPrompt,
 } from "./router/protocol";
 import { resolveEnforcementMode } from "./router/enforcement";
 import {
-  parseCapDirective,
-  buildCapBanner,
-  DEFAULT_TIER_CAPS,
   READ_ONLY_TOOLS,
 } from "./router/sessions";
 import type { Cap, SubagentState } from "./router/sessions";
@@ -53,12 +35,10 @@ import {
   dumpDelegateScorecard,
 } from "./escalate/ladder";
 import {
-  buildRouterOutput,
-  buildTiersOutput,
-  buildBudgetOutput,
-  buildPresetOutput,
+  registerRouterCommands,
+  handleCommandBefore,
 } from "./router/commands";
-import { buildAgentOptions } from "./router/agents";
+import { registerTierAgents } from "./router/agents";
 import { createPluginContext } from "./plugin/context";
 import type { PluginContext } from "./plugin/context";
 
@@ -498,113 +478,11 @@ const ModelRouterPlugin: Plugin = async (plugin: PluginInput) => {
     // Register tier agents + commands at load time
     // -----------------------------------------------------------------------
     config: async (opencodeConfig: any) => {
-      opencodeConfig.agent ??= {};
-
       // The config() hook runs once at plugin load time, so the load-time
       // snapshot is the right cfg here (matches the original behaviour where
       // `cfg` was initialised from loadConfig() once at factory start).
-      const cfg = ctx.initialConfig;
-
-      for (const [name, tier] of Object.entries(activeTiers)) {
-        // Resolve prompt: per-tier override wins; otherwise fall back to global tierPrompts[name].
-        const resolvedPrompt = tier.prompt ?? cfg.tierPrompts?.[name];
-
-        // For Claude-backed tiers, prepend an adversarial opener that revokes
-        // the cached "Claude Code exploratory agent" priming for this dispatch.
-        // Detection is by model string, so hybrid presets get the override
-        // only on their Claude-backed tiers.
-        const claudePrefix = isClaudeModel(tier.model)
-          ? `${CLAUDE_TIER_PREFIX[name]}\n\n${CLAUDE_ANTI_NARRATION}`
-          : undefined;
-        const finalPrompt =
-          claudePrefix && resolvedPrompt
-            ? `${claudePrefix}\n\n---\n\n${resolvedPrompt}`
-            : resolvedPrompt;
-
-        const agentDef: Record<string, unknown> = {
-          model: tier.model,
-          mode: "subagent",
-          description: tier.description,
-          maxSteps: tier.steps,
-          prompt: finalPrompt,
-          color: tier.color,
-        };
-
-        // Apply variant (thinking/reasoning mode)
-        if (tier.variant) {
-          agentDef.variant = tier.variant;
-        }
-
-        // Apply provider-specific options
-        const opts = buildAgentOptions(tier);
-        if (Object.keys(opts).length > 0) {
-          agentDef.options = opts;
-        }
-
-        opencodeConfig.agent[name] = agentDef;
-      }
-
-      // Register commands
-      opencodeConfig.command ??= {};
-      opencodeConfig.command["tiers"] = {
-        template: "",
-        description: "Show model delegation tiers and rules",
-      };
-      opencodeConfig.command["preset"] = {
-        template: "$ARGUMENTS",
-        description: "Show or switch model presets (e.g., /preset openai)",
-      };
-      opencodeConfig.command["budget"] = {
-        template: "$ARGUMENTS",
-        description:
-          "Show or switch routing mode (e.g., /budget, /budget budget, /budget quality)",
-      };
-      opencodeConfig.command["bypass"] = {
-        template: "$ARGUMENTS",
-        description:
-          "Toggle model-router bypass (disables delegation protocol for this session)",
-      };
-      opencodeConfig.command["annotate-plan"] = {
-        template: [
-          "Annotate the plan with tier directives for model delegation.",
-          "",
-          'Plan file: "$ARGUMENTS"',
-          "If no file was specified, search for the active plan: PLAN.md, plan.md, or the most recent .md with 'plan' in the name in the current directory or project root.",
-          "",
-          "## Available tiers",
-          "- `[tier:fast]` — Fast/cheap model: exploration, search, file reads, grep, listing, research. Agent does NOT edit code.",
-          "- `[tier:medium]` — Balanced model: implementation, refactoring, tests, code review, bug fixes, standard coding tasks.",
-          "- `[tier:heavy]` — Most capable model: architecture, complex debugging (after failures), security, performance, multi-system tradeoffs.",
-          "",
-          "## Annotation rules",
-          "1. Place `[tier:X]` at the START of each step, before the description",
-          "2. Research/exploration -> `[tier:fast]` (preferred)",
-          "3. Implementation/code -> `[tier:medium]` (preferred)",
-          "4. Architecture/security/hard debugging -> `[tier:heavy]`",
-          "5. If a step mixes exploration AND implementation, prefer splitting it into two steps when it improves delegation clarity",
-          "6. Verification (run tests, build) -> `[tier:medium]`",
-          "7. Trivial (single grep or file read) -> `[tier:fast]`",
-          "8. Final review of the complete plan -> `[tier:heavy]`",
-          "",
-          "## Output",
-          "Rewrite the entire plan in the file with the tags. Do not change the substance — only add tags, and split mixed steps when useful for clearer delegation.",
-          "",
-          "## Acceptance blocks (for enforcement)",
-          "For each NON-TRIVIAL task, append an acceptance block immediately after the step so the router can verify the work:",
-          "[acceptance]",
-          "check: <testsPass | buildPasses | lintClean | fileExists path=... | run command=\"...\" expect=...>",
-          "criteria: <plain-language success condition, when no deterministic check applies>",
-          "deliverable: <path or short description>",
-          "[/acceptance]",
-          "Prefer deterministic checks (testsPass/buildPasses/fileExists). Use a criteria line for design/explanatory tasks. Trivial read-only steps need no acceptance block.",
-        ].join("\n"),
-        description:
-          "Annotate a plan with [tier:fast/medium/heavy] delegation tags",
-      };
-      opencodeConfig.command["router"] = {
-        template: "$ARGUMENTS",
-        description: "Model-router controls (e.g., /router enforce off|advisory|enforced)",
-      };
+      registerTierAgents(opencodeConfig, activeTiers, ctx.initialConfig);
+      registerRouterCommands(opencodeConfig);
     },
 
     // -----------------------------------------------------------------------
@@ -643,70 +521,8 @@ const ModelRouterPlugin: Plugin = async (plugin: PluginInput) => {
     // -----------------------------------------------------------------------
     // Handle /tiers, /preset, and /budget commands
     // -----------------------------------------------------------------------
-    "command.execute.before": async (input: any, output: any) => {
-      if (input.command === "tiers") {
-        let cfg = ctx.getConfig();
-        try {
-          cfg = ctx.refreshConfig();
-        } catch {}
-        output.parts.push({
-          type: "text" as const,
-          text: buildTiersOutput(cfg),
-        });
-      }
-
-      if (input.command === "preset") {
-        let cfg = ctx.getConfig();
-        try {
-          cfg = ctx.refreshConfig();
-        } catch {}
-        output.parts.push({
-          type: "text" as const,
-          text: buildPresetOutput(cfg, input.arguments ?? ""),
-        });
-      }
-
-      if (input.command === "bypass") {
-        const arg = (input.arguments ?? "").trim().toLowerCase();
-        if (arg === "on") {
-          ctx.state.bypassed = true;
-        } else if (arg === "off") {
-          ctx.state.bypassed = false;
-        } else {
-          ctx.state.bypassed = !ctx.state.bypassed;
-        }
-        const status = ctx.state.bypassed ? "ON" : "OFF";
-        const desc = ctx.state.bypassed
-          ? "Model-router is **bypassed**. Delegation protocol, cap enforcement, and narration detection are disabled. The model will run without routing rules until you run `/bypass off` or restart OpenCode."
-          : "Model-router is **active**. Delegation protocol and all enforcement rules are in effect.";
-        output.parts.push({
-          type: "text" as const,
-          text: `# Bypass: ${status}\n\n${desc}`,
-        });
-      }
-
-      if (input.command === "budget") {
-        let cfg = ctx.getConfig();
-        try {
-          cfg = ctx.refreshConfig();
-        } catch {}
-        output.parts.push({
-          type: "text" as const,
-          text: buildBudgetOutput(cfg, input.arguments ?? ""),
-        });
-      }
-
-      if (input.command === "router") {
-        let cfg = ctx.getConfig();
-        try {
-          cfg = ctx.refreshConfig();
-        } catch {}
-        output.parts.push({
-          type: "text" as const,
-          text: buildRouterOutput(cfg, input.arguments ?? ""),
-        });
-      }
-    },
+    "command.execute.before": (input: any, output: any) =>
+      handleCommandBefore(ctx, input, output),
   };
 };
 

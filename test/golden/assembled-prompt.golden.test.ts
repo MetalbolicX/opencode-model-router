@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import { validateConfig } from "../../src/router/config";
 import { assembleSystemPrompt } from "../../src/router/protocol";
-import type { RouterConfig } from "../../src/index";
+import type { RouterConfig } from "../../src/router/config";
 
 describe("assembled-prompt golden", () => {
   const raw = JSON.parse(

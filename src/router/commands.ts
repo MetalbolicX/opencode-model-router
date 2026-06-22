@@ -9,6 +9,7 @@ import {
   saveActiveMode,
   saveEnforcementMode,
 } from "./config";
+import type { PluginContext } from "../plugin/context";
 
 // ---------------------------------------------------------------------------
 // /router command output
@@ -174,4 +175,165 @@ export function buildPresetOutput(cfg: RouterConfig, args: string): string {
   }
 
   return `Unknown preset: "${requestedPreset}". Available: ${Object.keys(cfg.presets).join(", ")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Register router commands on the opencode config object
+// ---------------------------------------------------------------------------
+
+/**
+ * Populate `opencodeConfig.command` with the router-owned command set:
+ * `/tiers`, `/preset`, `/budget`, `/bypass`, `/annotate-plan`, and `/router`.
+ * Mirrors the block that lived in `src/index.ts`'s `config()` hook.
+ *
+ * Side-effect only — the returned void matches the original inline block.
+ */
+export function registerRouterCommands(
+  opencodeConfig: {
+    command?: Record<string, { template: string; description: string }>;
+  },
+): void {
+  opencodeConfig.command ??= {};
+  opencodeConfig.command["tiers"] = {
+    template: "",
+    description: "Show model delegation tiers and rules",
+  };
+  opencodeConfig.command["preset"] = {
+    template: "$ARGUMENTS",
+    description: "Show or switch model presets (e.g., /preset openai)",
+  };
+  opencodeConfig.command["budget"] = {
+    template: "$ARGUMENTS",
+    description:
+      "Show or switch routing mode (e.g., /budget, /budget budget, /budget quality)",
+  };
+  opencodeConfig.command["bypass"] = {
+    template: "$ARGUMENTS",
+    description:
+      "Toggle model-router bypass (disables delegation protocol for this session)",
+  };
+  opencodeConfig.command["annotate-plan"] = {
+    template: [
+      "Annotate the plan with tier directives for model delegation.",
+      "",
+      'Plan file: "$ARGUMENTS"',
+      "If no file was specified, search for the active plan: PLAN.md, plan.md, or the most recent .md with 'plan' in the name in the current directory or project root.",
+      "",
+      "## Available tiers",
+      "- `[tier:fast]` — Fast/cheap model: exploration, search, file reads, grep, listing, research. Agent does NOT edit code.",
+      "- `[tier:medium]` — Balanced model: implementation, refactoring, tests, code review, bug fixes, standard coding tasks.",
+      "- `[tier:heavy]` — Most capable model: architecture, complex debugging (after failures), security, performance, multi-system tradeoffs.",
+      "",
+      "## Annotation rules",
+      "1. Place `[tier:X]` at the START of each step, before the description",
+      "2. Research/exploration -> `[tier:fast]` (preferred)",
+      "3. Implementation/code -> `[tier:medium]` (preferred)",
+      "4. Architecture/security/hard debugging -> `[tier:heavy]`",
+      "5. If a step mixes exploration AND implementation, prefer splitting it into two steps when it improves delegation clarity",
+      "6. Verification (run tests, build) -> `[tier:medium]`",
+      "7. Trivial (single grep or file read) -> `[tier:fast]`",
+      "8. Final review of the complete plan -> `[tier:heavy]`",
+      "",
+      "## Output",
+      "Rewrite the entire plan in the file with the tags. Do not change the substance — only add tags, and split mixed steps when useful for clearer delegation.",
+      "",
+      "## Acceptance blocks (for enforcement)",
+      "For each NON-TRIVIAL task, append an acceptance block immediately after the step so the router can verify the work:",
+      "[acceptance]",
+      "check: <testsPass | buildPasses | lintClean | fileExists path=... | run command=\"...\" expect=...>",
+      "criteria: <plain-language success condition, when no deterministic check applies>",
+      "deliverable: <path or short description>",
+      "[/acceptance]",
+      "Prefer deterministic checks (testsPass/buildPasses/fileExists). Use a criteria line for design/explanatory tasks. Trivial read-only steps need no acceptance block.",
+    ].join("\n"),
+    description:
+      "Annotate a plan with [tier:fast/medium/heavy] delegation tags",
+  };
+  opencodeConfig.command["router"] = {
+    template: "$ARGUMENTS",
+    description: "Model-router controls (e.g., /router enforce off|advisory|enforced)",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// command.execute.before dispatch
+// ---------------------------------------------------------------------------
+
+/**
+ * Dispatch handler for the `command.execute.before` hook. Pushes a text
+ * part onto `output.parts` for `/tiers`, `/preset`, `/budget`, and `/router`,
+ * and toggles `ctx.state.bypassed` for `/bypass`. Mirrors the block that
+ * lived inline in `src/index.ts`.
+ *
+ * The function is async because the hook itself was async; the body performs
+ * no asynchronous work (the await was structural). Errors in `refreshConfig()`
+ * are swallowed (we fall back to the cached cfg) — same fail-soft semantics.
+ */
+export async function handleCommandBefore(
+  ctx: PluginContext,
+  input: { command: string; arguments?: string },
+  output: { parts: Array<{ type: "text"; text: string }> },
+): Promise<void> {
+  if (input.command === "tiers") {
+    let cfg = ctx.getConfig();
+    try {
+      cfg = ctx.refreshConfig();
+    } catch {}
+    output.parts.push({
+      type: "text" as const,
+      text: buildTiersOutput(cfg),
+    });
+  }
+
+  if (input.command === "preset") {
+    let cfg = ctx.getConfig();
+    try {
+      cfg = ctx.refreshConfig();
+    } catch {}
+    output.parts.push({
+      type: "text" as const,
+      text: buildPresetOutput(cfg, input.arguments ?? ""),
+    });
+  }
+
+  if (input.command === "bypass") {
+    const arg = (input.arguments ?? "").trim().toLowerCase();
+    if (arg === "on") {
+      ctx.state.bypassed = true;
+    } else if (arg === "off") {
+      ctx.state.bypassed = false;
+    } else {
+      ctx.state.bypassed = !ctx.state.bypassed;
+    }
+    const status = ctx.state.bypassed ? "ON" : "OFF";
+    const desc = ctx.state.bypassed
+      ? "Model-router is **bypassed**. Delegation protocol, cap enforcement, and narration detection are disabled. The model will run without routing rules until you run `/bypass off` or restart OpenCode."
+      : "Model-router is **active**. Delegation protocol and all enforcement rules are in effect.";
+    output.parts.push({
+      type: "text" as const,
+      text: `# Bypass: ${status}\n\n${desc}`,
+    });
+  }
+
+  if (input.command === "budget") {
+    let cfg = ctx.getConfig();
+    try {
+      cfg = ctx.refreshConfig();
+    } catch {}
+    output.parts.push({
+      type: "text" as const,
+      text: buildBudgetOutput(cfg, input.arguments ?? ""),
+    });
+  }
+
+  if (input.command === "router") {
+    let cfg = ctx.getConfig();
+    try {
+      cfg = ctx.refreshConfig();
+    } catch {}
+    output.parts.push({
+      type: "text" as const,
+      text: buildRouterOutput(cfg, input.arguments ?? ""),
+    });
+  }
 }
