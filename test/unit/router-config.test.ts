@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,7 +12,9 @@ import {
   globalConfigPath,
   localConfigPath,
   configPath as realConfigPath,
+  configPath,
 } from "../../src/router/config";
+import { createConfigStore } from "../../src/router/config-store";
 
 let tmpHome: string;
 let origHOME: string | undefined;
@@ -498,5 +500,91 @@ describe("Layered config — cwd change requires cache invalidation", () => {
 
     invalidateConfigCache();
     expect(loadConfig().activePreset).toBe("google");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: bundled config path resolution (source vs bundled layout)
+// ---------------------------------------------------------------------------
+
+describe("configPath resolution — regression for bundle path bug", () => {
+  it("resolves tiers.json from the source layout (src/router/)", () => {
+    const path = configPath();
+    expect(path).toContain("tiers.json");
+    expect(existsSync(path)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-instance ConfigStore integration — two-instance and two-CWD isolation.
+//
+// These exercises prove the Phase-2 invariant at the config-layer surface:
+// each ConfigStore has its own cache; one's refresh never mutates another's
+// resolved value.
+// ---------------------------------------------------------------------------
+
+describe("Per-instance ConfigStore — two-instance isolation", () => {
+  it("two stores on the same cwd share disk reads but keep independent caches", () => {
+    const storeA = createConfigStore({ cwd: tmpCwd });
+    const storeB = createConfigStore({ cwd: tmpCwd });
+    expect(storeA.read().activePreset).toBe(storeB.read().activePreset);
+
+    // Stage a new local layer; only the store that refreshes sees it.
+    stageLocal({ activePreset: "openai" });
+    storeA.refresh();
+    expect(storeA.read().activePreset).toBe("openai");
+    expect(storeB.read().activePreset).toBe("multi-provider");
+  });
+
+  it("invalidateConfigCache (legacy) does not affect a ConfigStore's cache", () => {
+    const store = createConfigStore({ cwd: tmpCwd });
+    const before = store.read().activePreset;
+    invalidateConfigCache();
+    expect(store.read().activePreset).toBe(before);
+  });
+});
+
+describe("Per-instance ConfigStore — two-CWD isolation", () => {
+  it("two stores on different cwds see different local layers", () => {
+    const otherCwd = join(tmpHome, "other-cwd");
+    mkdirSync(otherCwd, { recursive: true });
+    stageLocal({ activePreset: "openai" });
+    const otherLocalDir = join(otherCwd, ".opencode");
+    mkdirSync(otherLocalDir, { recursive: true });
+    writeFileSync(
+      join(otherLocalDir, "tiers.json"),
+      JSON.stringify({ activePreset: "google" }),
+      "utf-8",
+    );
+
+    const storeA = createConfigStore({ cwd: tmpCwd });
+    const storeB = createConfigStore({ cwd: otherCwd });
+    expect(storeA.read().activePreset).toBe("openai");
+    expect(storeB.read().activePreset).toBe("google");
+  });
+
+  it("refreshing one store never invalidates the other store's resolved config", () => {
+    const otherCwd = join(tmpHome, "other-cwd");
+    mkdirSync(otherCwd, { recursive: true });
+    stageLocal({ activePreset: "openai" });
+    const otherLocalDir = join(otherCwd, ".opencode");
+    mkdirSync(otherLocalDir, { recursive: true });
+    writeFileSync(
+      join(otherLocalDir, "tiers.json"),
+      JSON.stringify({ activePreset: "google" }),
+      "utf-8",
+    );
+
+    const storeA = createConfigStore({ cwd: tmpCwd });
+    const storeB = createConfigStore({ cwd: otherCwd });
+    // Snapshot both, refresh one, the other must stay frozen.
+    const beforeA = storeA.read().activePreset;
+    const beforeB = storeB.read().activePreset;
+    expect(beforeA).toBe("openai");
+    expect(beforeB).toBe("google");
+
+    storeA.refresh();
+    expect(storeA.read().activePreset).toBe("openai");
+    expect(storeB.read().activePreset).toBe("google");
   });
 });

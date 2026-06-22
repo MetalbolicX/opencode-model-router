@@ -11,13 +11,13 @@ import { fileURLToPath } from "node:url";
 // validates the merged result once, and finally overlays runtime state.
 // ---------------------------------------------------------------------------
 
-type ConfigLayer = {
+export type ConfigLayer = {
   kind: "bundled" | "global" | "local";
   path: string;
   required: boolean;
 };
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
+export function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
@@ -108,7 +108,13 @@ export function invalidateConfigCache(): void {
 
 function getPluginRoot(): string {
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  return join(__dirname, "../.."); // src/router/ -> plugin root
+  // Probe both layouts:
+  // 1. Source layout: src/router/config.ts → ../../tiers.json (repo root)
+  // 2. Bundled layout: dist/plugin.mjs → ../tiers.json (repo root)
+  const sourceRoot = join(__dirname, "../..");
+  const bundledRoot = join(__dirname, "..");
+  if (existsSync(join(bundledRoot, "tiers.json"))) return bundledRoot;
+  return sourceRoot;
 }
 
 export function configPath(): string {
@@ -141,7 +147,17 @@ export function statePath(): string {
  * - Throws a path-prefixed error for any other read or parse failure, or when
  *   a required layer is missing.
  */
-function readConfigLayer(layer: ConfigLayer): Record<string, unknown> | undefined {
+/**
+ * Read a single manual config layer from disk.
+ * - Returns the parsed JSON object on success.
+ * - Returns `undefined` ONLY when an optional layer is missing (ENOENT).
+ * - Throws a path-prefixed error for any other read or parse failure, or when
+ *   a required layer is missing.
+ *
+ * Exported for `src/router/config-store.ts`; pure with respect to module state
+ * (no shared mutable globals).
+ */
+export function readConfigLayer(layer: ConfigLayer): Record<string, unknown> | undefined {
   let raw: string;
   try {
     raw = readFileSync(layer.path, "utf-8");
@@ -183,7 +199,16 @@ function readConfigLayer(layer: ConfigLayer): Record<string, unknown> | undefine
  * - Arrays and scalars (including `null`) ⇒ override replaces base.
  * - `null` is NOT a plain object; it is treated as a scalar replacement.
  */
-function deepMergeConfig(base: unknown, override: unknown): unknown {
+/**
+ * Deep-merge two config-shaped values with these rules:
+ * - `undefined` in either position returns the other.
+ * - Both plain objects ⇒ recursive merge by key union.
+ * - Arrays and scalars (including `null`) ⇒ override replaces base.
+ * - `null` is NOT a plain object; it is treated as a scalar replacement.
+ *
+ * Exported for `src/router/config-store.ts`; pure.
+ */
+export function deepMergeConfig(base: unknown, override: unknown): unknown {
   if (base === undefined) return override;
   if (override === undefined) return base;
   if (isPlainObject(base) && isPlainObject(override)) {
@@ -203,7 +228,17 @@ function deepMergeConfig(base: unknown, override: unknown): unknown {
  * - `state.enforcementMode` → `cfg.enforcement.mode`, creating `cfg.enforcement` if missing
  * All other manual fields are preserved unchanged.
  */
-function applyStateOverlay(cfg: RouterConfig, state: RouterState): void {
+/**
+ * Narrow state overlay. Writes ONLY:
+ * - `state.activePreset` → `cfg.activePreset` when `resolvePresetName()` succeeds
+ * - `state.activeMode`   → `cfg.activeMode` when the mode exists in `cfg.modes`
+ * - `state.enforcementMode` → `cfg.enforcement.mode`, creating `cfg.enforcement` if missing
+ * All other manual fields are preserved unchanged.
+ *
+ * Exported for `src/router/config-store.ts`; mutates `cfg` in place but has
+ * no shared state.
+ */
+export function applyStateOverlay(cfg: RouterConfig, state: RouterState): void {
   if (state.activePreset) {
     const resolved = resolvePresetName(cfg, state.activePreset);
     if (resolved) {
@@ -519,6 +554,14 @@ export function validateConfig(raw: unknown): RouterConfig {
   return raw as RouterConfig;
 }
 
+/**
+ * Legacy module-level config cache. Kept during PR1 for existing callers
+ * (router-config.test.ts, layer2-wiring.test.ts, saveActive* helpers,
+ * etc.); the plugin runtime no longer uses it — `createPluginContext()`
+ * creates its own per-instance `ConfigStore` via
+ * `src/router/config-store.ts`. Removal is planned for a later slice once
+ * every call site migrates to `ctx.getConfig()` / `ctx.refreshConfig()`.
+ */
 export function loadConfig(): RouterConfig {
   if (_cachedConfig && !_configDirty) {
     return _cachedConfig;

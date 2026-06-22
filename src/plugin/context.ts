@@ -10,10 +10,15 @@
 // createPluginContext() constructs the stores lazily from PluginInput and
 // returns the fully-wired context. The factory never throws — the inner
 // store factories are all safe to call with no arguments.
+//
+// PR1 of the core-refactor-plan swaps the legacy module-level `loadConfig()`
+// singleton for a per-instance `ConfigStore` (see `../router/config-store.ts`):
+// - `getConfig()`    → `store.read()`   — returns the cached value or re-reads.
+// - `refreshConfig()`→ `store.refresh()`— forces a re-read and replaces the cache.
+// One instance's refresh no longer mutates another instance's cached result.
 // ---------------------------------------------------------------------------
 
 import type { PluginInput } from "@opencode-ai/plugin";
-import { loadConfig } from "../router/config";
 import type { RouterConfig, Preset } from "../router/config";
 import { getActiveTiers } from "../router/protocol";
 import { createSessionStore } from "../router/sessions";
@@ -25,6 +30,7 @@ import type { MutexRegistry } from "../verify/types";
 import { createExecSeam } from "../utils/shell";
 import { createFsSeam } from "../utils/fs";
 import type { ExecSeam, FsSeam } from "../verify/types";
+import { createConfigStore } from "../router/config-store";
 
 /**
  * Mutable per-plugin state that isn't a store (today: only the bypass flag).
@@ -58,8 +64,7 @@ export interface PluginContext {
    *  /preset / /budget / /router last wrote + re-read). */
   getConfig(): RouterConfig;
 
-  /** Force the next getConfig() to re-read from disk. Used by hooks that mutate
-   *  state on disk and need a fresh cfg. */
+  /** Force a fresh read from disk and replace the cached value. */
   refreshConfig(): RouterConfig;
 
   /** Mutable per-plugin runtime state (bypass flag). */
@@ -90,11 +95,14 @@ export interface PluginContext {
 
 /**
  * Build a fully-wired PluginContext for one plugin instance. Stores are
- * fresh per call, the config is loaded from disk once, and seams are
- * bound to the plugin's working directory.
+ * fresh per call, the config is loaded from disk once via the per-instance
+ * ConfigStore, and seams are bound to the plugin's working directory.
  */
 export function createPluginContext(plugin: PluginInput): PluginContext {
-  const initialConfig = loadConfig();
+  const configStore = createConfigStore({
+    cwd: plugin.directory ?? process.cwd(),
+  });
+  const initialConfig = configStore.read();
   const activeTiersAtLoad = getActiveTiers(initialConfig);
 
   return {
@@ -102,10 +110,10 @@ export function createPluginContext(plugin: PluginInput): PluginContext {
     initialConfig,
     activeTiersAtLoad,
     getConfig(): RouterConfig {
-      return loadConfig();
+      return configStore.read();
     },
     refreshConfig(): RouterConfig {
-      return loadConfig();
+      return configStore.refresh();
     },
     state: {
       bypassed: false,
