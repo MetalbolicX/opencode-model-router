@@ -469,6 +469,42 @@ export function writeState(patch: Partial<RouterState>): void {
 }
 
 // ---------------------------------------------------------------------------
+// State save helpers — write user-selected state and invalidate config cache
+// ---------------------------------------------------------------------------
+
+export function saveActivePreset(presetName: string): void {
+  const cfg = loadConfig();
+  const resolved = resolvePresetName(cfg, presetName);
+  if (!resolved) {
+    return;
+  }
+
+  cfg.activePreset = resolved;
+
+  // Persist user-selected preset to state file only — never mutate tiers.json
+  writeState({ activePreset: resolved });
+
+  // Invalidate cache so next read picks up the new active preset
+  invalidateConfigCache();
+}
+
+export function saveActiveMode(modeName: string): void {
+  const cfg = loadConfig();
+  if (!cfg.modes?.[modeName]) {
+    return;
+  }
+
+  cfg.activeMode = modeName;
+  writeState({ activeMode: modeName });
+  invalidateConfigCache();
+}
+
+export function saveEnforcementMode(mode: "off" | "advisory" | "enforced"): void {
+  writeState({ enforcementMode: mode });
+  invalidateConfigCache();
+}
+
+// ---------------------------------------------------------------------------
 // Enforcement helpers
 // ---------------------------------------------------------------------------
 
