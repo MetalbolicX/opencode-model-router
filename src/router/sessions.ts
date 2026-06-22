@@ -1,5 +1,6 @@
 import type { RouterConfig } from "./config";
 import { fingerprintToolCall } from "../guard/fingerprint";
+import { isTextPart } from "../plugin/types";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -53,6 +54,8 @@ function extractDispatchText(output: unknown): string {
   for (const p of parts) {
     if (typeof p === "string") {
       chunks.push(p);
+    } else if (isTextPart(p)) {
+      chunks.push(p.text);
     } else if (p && typeof p === "object") {
       const rec = p as Record<string, unknown>;
       if (typeof rec.text === "string") chunks.push(rec.text);

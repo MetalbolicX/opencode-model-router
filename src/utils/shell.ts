@@ -12,7 +12,7 @@
 // behaviour stays byte-identical.
 // ---------------------------------------------------------------------------
 
-import { exec as nodeExec } from "node:child_process";
+import { exec as nodeExec, type ExecException } from "node:child_process";
 import type { ExecSeam, ExecResult } from "../verify/types";
 
 /** Per-call options accepted by the exec seam. */
@@ -62,7 +62,7 @@ export function createExecSeam(ctx: ExecSeamContext): ExecSeam {
             maxBuffer: MAX_BUFFER_BYTES,
             windowsHide: true,
           },
-          (err: any, stdout: any, stderr: any) => {
+          (err: ExecException | null, stdout: string, stderr: string) => {
             const timedOut = !!(err && err.killed && err.signal === "SIGTERM");
             const code =
               err && typeof err.code === "number" ? err.code : err ? 1 : 0;

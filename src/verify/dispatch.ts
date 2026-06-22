@@ -22,6 +22,13 @@ import type { GateDeps } from "./gate";
 import { accept } from "./gate";
 import { resolveEnforcementMode } from "../router/enforcement";
 import { scrubText } from "../guard/scrub";
+import {
+  asTaskToolArgs,
+  extractPromptText,
+  extractSessionId,
+  type SessionCreateResult,
+  type SessionPromptResult,
+} from "../plugin/types";
 
 /** Tools that mutate the workspace (mirrors the guard taxonomy). */
 const WRITE_TOOLS = new Set(["write", "edit", "patch", "multiedit"]);
@@ -193,25 +200,23 @@ export async function dispatchGrader(
   req: { tier: string; system: string; prompt: string },
 ): Promise<{ sessionID: string; text: string }> {
   const cfg = ctx.getConfig();
-  const created: any = await ctx.plugin.client.session.create({});
-  const sid: string | undefined = created?.data?.id;
+  const created = (await ctx.plugin.client.session.create(
+    {},
+  )) as SessionCreateResult;
+  const sid = extractSessionId(created);
   if (!sid) return { sessionID: "", text: "" };
   ctx.graderSessions.add(sid);
   try {
     const model = tierModel(cfg, req.tier) ?? undefined;
-    const res: any = await ctx.plugin.client.session.prompt({
+    const res = (await ctx.plugin.client.session.prompt({
       path: { id: sid },
       body: {
         ...(model ? { model } : {}),
         system: req.system,
         parts: [{ type: "text", text: req.prompt }],
       },
-    });
-    const parts: any[] = res?.data?.parts ?? [];
-    const text = parts
-      .filter((p) => p?.type === "text" && typeof p.text === "string")
-      .map((p) => p.text)
-      .join("\n");
+    })) as SessionPromptResult;
+    const text = extractPromptText(res);
     return { sessionID: sid, text };
   } finally {
     ctx.graderSessions.delete(sid);
@@ -245,10 +250,13 @@ export function buildGateDeps(ctx: PluginContext): GateDeps {
  *  swallowed so the after-hook never crashes a real session. */
 export async function verifyTaskAfterHook(
   ctx: PluginContext,
-  input: any,
-  output: any,
+  input: unknown,
+  output: Record<string, unknown>,
 ): Promise<void> {
-  if (typeof input?.tool !== "string") return;
+  const inputRec = (input ?? {}) as Record<string, unknown>;
+  const toolName = inputRec["tool"];
+  if (typeof toolName !== "string") return;
+  const taskArgs = asTaskToolArgs(inputRec["args"]);
   const activeCfg = ctx.getConfig();
   let mode = "off";
   try {
@@ -257,16 +265,13 @@ export async function verifyTaskAfterHook(
     // fall through with mode "off"
   }
   const requireMode = activeCfg.enforcement?.verify?.require;
-  if (!shouldVerifyTask(input.tool, mode, requireMode)) return;
+  if (!shouldVerifyTask(toolName, mode, requireMode)) return;
   try {
     const { finalReturnText, childSessionID } = parseTaskResult(output);
-    const producerTier =
-      typeof input?.args?.subagent_type === "string"
-        ? input.args.subagent_type
-        : "";
+    const producerTier = taskArgs?.subagent_type ?? "";
     const dod = buildDelegationDoD({
-      prompt: input?.args?.prompt,
-      description: input?.args?.description,
+      prompt: taskArgs?.prompt,
+      description: taskArgs?.description,
     });
     const artefact = {
       changedFiles: childSessionID
@@ -290,10 +295,9 @@ export async function verifyTaskAfterHook(
       const li = ladder.indexOf(producerTier);
       const nextTier = li >= 0 && li < ladder.length - 1 ? ladder[li + 1] : null;
       const note = scrubText(buildForcingNote(res.verdict.reasons, { producerTier, nextTier }));
-      output.output =
-        typeof output.output === "string"
-          ? output.output + "\n\n" + note
-          : note;
+      const existing = output["output"];
+      output["output"] =
+        typeof existing === "string" ? existing + "\n\n" + note : note;
     }
     if (childSessionID) ctx.changedFileStore.clear(childSessionID);
   } catch {
