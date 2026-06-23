@@ -7,10 +7,8 @@
 // change is that handlers take `ctx: PluginContext` as their first argument
 // instead of closing over plugin-scoped locals.
 //
-// PR2 (Phase 3) will replace the `any` payloads with narrow runtime DTOs
-// from `src/plugin/types.ts`; the present file deliberately preserves the
-// pre-refactor shape so this PR is a pure extraction with zero semantic
-// drift.
+// All hook payloads use narrow runtime DTOs from `src/plugin/types.ts`
+// (`HookPayload` / `HookEventPayload`) instead of `any`.
 // ---------------------------------------------------------------------------
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -26,6 +24,7 @@ import { resolveEnforcementMode } from "../router/enforcement";
 import { READ_ONLY_TOOLS } from "../router/sessions";
 import { verifyTaskAfterHook } from "../verify/dispatch";
 import type { PluginContext } from "./context";
+import type { HookEventPayload, HookPayload } from "./types";
 import type { Preset } from "../router/config";
 
 // ---------------------------------------------------------------------------
@@ -34,11 +33,12 @@ import type { Preset } from "../router/config";
 
 export async function handleChatParams(
   ctx: PluginContext,
-  input: any,
-  output: any,
+  input: HookPayload,
+  output: HookPayload,
 ): Promise<void> {
   try {
-    if (input?.sessionID && ctx.graderSessions.has(input.sessionID)) {
+    const sessionID = input?.sessionID as string | undefined;
+    if (sessionID && ctx.graderSessions.has(sessionID)) {
       output.temperature = ctx.getConfig().enforcement?.verify?.graderTemperature ?? 0;
     }
   } catch {
@@ -55,8 +55,8 @@ export async function handleChatParams(
 
 export async function handleChatMessage(
   ctx: PluginContext,
-  input: any,
-  output: any,
+  input: HookPayload,
+  output: HookPayload,
 ): Promise<void> {
   if (ctx.state.bypassed) return;
   // Re-read cfg so /preset switches take effect without restart
@@ -67,12 +67,17 @@ export async function handleChatMessage(
     // keep last known cfg if file read fails
   }
   const tierNames = Object.keys(getActiveTiers(cfg));
-  ctx.sessionStore.registerFromChatMessage(input, output, cfg, tierNames);
+  ctx.sessionStore.registerFromChatMessage(
+    input as { agent?: string; sessionID: string },
+    output,
+    cfg,
+    tierNames,
+  );
 
   // Record-only: initialise a trajectory scorecard for tracked subagents.
-  const sid = input?.sessionID;
+  const sid = input?.sessionID as string | undefined;
   if (sid && ctx.sessionStore.isSubagent(sid)) {
-    ctx.trajectoryStore.ensure(sid, input?.agent ?? null);
+    ctx.trajectoryStore.ensure(sid, (input?.agent as string | undefined) ?? null);
   }
 }
 
@@ -82,12 +87,13 @@ export async function handleChatMessage(
 
 export async function handleToolExecuteBefore(
   ctx: PluginContext,
-  input: any,
-  output: any,
+  input: HookPayload,
+  output: HookPayload,
 ): Promise<void> {
   if (ctx.state.bypassed) return;
-  const sid = input?.sessionID;
-  if (!sid || !ctx.sessionStore.isSubagent(sid) || typeof input?.tool !== "string") {
+  const sid = input?.sessionID as string | undefined;
+  const tool = input?.tool as string | undefined;
+  if (!sid || !ctx.sessionStore.isSubagent(sid) || typeof tool !== "string") {
     return;
   }
   let res;
@@ -97,8 +103,8 @@ export async function handleToolExecuteBefore(
       tier: ctx.sessionStore.getTier(sid),
       trivial: ctx.sessionStore.isTrivial(sid),
       sessionID: sid,
-      tool: input.tool,
-      toolArgs: output?.args,
+      tool,
+      toolArgs: output?.args as Record<string, unknown> | undefined,
       store: ctx.guardStore,
       env: process.env,
     });
@@ -107,8 +113,8 @@ export async function handleToolExecuteBefore(
   }
   if (res.block) {
     ctx.trajectoryStore.recordToolEvent(sid, {
-      tool: input.tool,
-      readOnly: READ_ONLY_TOOLS.has(input.tool),
+      tool,
+      readOnly: READ_ONLY_TOOLS.has(tool),
       blocked: true,
       selfScript: res.guard === "anti_self_script",
     });
@@ -122,32 +128,36 @@ export async function handleToolExecuteBefore(
 
 export async function handleToolExecuteAfter(
   ctx: PluginContext,
-  input: any,
-  output: any,
+  input: HookPayload,
+  output: HookPayload,
 ): Promise<void> {
   if (ctx.state.bypassed) return;
-  ctx.sessionStore.recordToolCall(input, output);
+  ctx.sessionStore.recordToolCall(
+    input as { sessionID: string; tool: string; args: unknown },
+    output,
+  );
 
   // Record-only trajectory observation (mutates internal maps only; never
   // touches output, so emitted banners/observations stay byte-identical).
-  const sid = input?.sessionID;
+  const sid = input?.sessionID as string | undefined;
+  const tool = input?.tool as string | undefined;
 
   // Attribute changed files to whichever session made the edit (any session).
-  if (sid && typeof input?.tool === "string") {
-    ctx.changedFileStore.record(sid, input.tool, input?.args);
+  if (sid && typeof tool === "string") {
+    ctx.changedFileStore.record(sid, tool, input?.args);
   }
 
-  if (sid && ctx.sessionStore.isSubagent(sid) && typeof input?.tool === "string") {
+  if (sid && ctx.sessionStore.isSubagent(sid) && typeof tool === "string") {
     ctx.trajectoryStore.recordToolEvent(sid, {
-      tool: input.tool,
-      readOnly: READ_ONLY_TOOLS.has(input.tool),
+      tool,
+      readOnly: READ_ONLY_TOOLS.has(tool),
     });
     try {
       guardAfterCall({
         cfg: ctx.getConfig(),
         tier: ctx.sessionStore.getTier(sid),
         sessionID: sid,
-        tool: input.tool,
+        tool,
         toolArgs: input?.args,
         output,
         store: ctx.guardStore,
@@ -169,8 +179,8 @@ export async function handleToolExecuteAfter(
 
 export async function handleTextComplete(
   ctx: PluginContext,
-  _input: any,
-  output: any,
+  _input: HookPayload,
+  output: HookPayload,
 ): Promise<void> {
   if (ctx.state.bypassed) return;
   const text = output?.text;
@@ -191,11 +201,12 @@ export async function handleTextComplete(
 
 export async function handleSessionIdle(
   ctx: PluginContext,
-  payload: any,
+  payload: HookEventPayload,
 ): Promise<void> {
   const event = payload?.event;
   if (event?.type !== "session.idle") return;
-  const sid = event?.properties?.sessionID;
+  const props = event?.properties as Record<string, unknown> | undefined;
+  const sid = props?.sessionID as string | undefined;
   if (typeof sid !== "string") return;
 
   // Per-delegation scorecard: only when enforcement was active (guard state exists).
@@ -231,8 +242,8 @@ export async function handleSessionIdle(
 
 export async function handleSystemTransform(
   ctx: PluginContext,
-  _input: any,
-  output: any,
+  _input: HookPayload,
+  output: HookPayload,
 ): Promise<void> {
   if (ctx.state.bypassed) return;
   // Returns cache unless invalidated
@@ -245,19 +256,20 @@ export async function handleSystemTransform(
 
   // Skip injection for child (subagent) sessions.
   // Child sessions are detected via session.created events with a parentID.
-  const sessionID = _input?.sessionID;
+  const sessionID = _input?.sessionID as string | undefined;
   if (sessionID && ctx.sessionStore.isSubagent(sessionID)) return;
 
   // For Claude-backed orchestrators, prepend an adversarial opener that
   // revokes the cached "Claude Code explorer" priming for the routing
   // role. Detection is by orchestrator model, not preset.
-  const providerID = _input?.model?.providerID ?? "";
-  const modelID = _input?.model?.modelID ?? "";
+  const model = _input?.model as { providerID?: string; modelID?: string } | undefined;
+  const providerID = model?.providerID ?? "";
+  const modelID = model?.modelID ?? "";
   const orchestratorModel = providerID && modelID ? `${providerID}/${modelID}` : modelID;
 
   let enfOn = false;
   try { enfOn = resolveEnforcementMode({ config: cfg, env: process.env }).mode !== "off"; } catch {}
-  output.system.push(assembleSystemPrompt(cfg, orchestratorModel, enfOn));
+  (output.system as string[]).push(assembleSystemPrompt(cfg, orchestratorModel, enfOn));
 }
 
 // ---------------------------------------------------------------------------

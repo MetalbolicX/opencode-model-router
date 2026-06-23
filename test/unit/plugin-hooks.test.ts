@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { PluginContext } from "../../src/plugin/context";
+import type { HookEventPayload, HookPayload } from "../../src/plugin/types";
 import type { RouterConfig, Preset } from "../../src/router/config";
 import { invalidateConfigCache } from "../../src/router/config";
 import {
@@ -202,50 +203,50 @@ function makeHarness(opts?: {
 describe("hook handlers — fail-soft on bad input", () => {
   it("handleChatParams does not throw on undefined input", async () => {
     const { ctx } = makeHarness();
-    await expect(handleChatParams(ctx, undefined, {})).resolves.toBeUndefined();
-    await expect(handleChatParams(ctx, {}, undefined)).resolves.toBeUndefined();
-    await expect(handleChatParams(ctx, null, null)).resolves.toBeUndefined();
+    await expect(handleChatParams(ctx, undefined as unknown as HookPayload, {})).resolves.toBeUndefined();
+    await expect(handleChatParams(ctx, {}, undefined as unknown as HookPayload)).resolves.toBeUndefined();
+    await expect(handleChatParams(ctx, null as unknown as HookPayload, null as unknown as HookPayload)).resolves.toBeUndefined();
   });
 
   it("handleChatMessage does not throw on undefined input", async () => {
     const { ctx } = makeHarness();
-    await expect(handleChatMessage(ctx, undefined, {})).resolves.toBeUndefined();
-    await expect(handleChatMessage(ctx, {}, undefined)).resolves.toBeUndefined();
-    await expect(handleChatMessage(ctx, null, null)).resolves.toBeUndefined();
+    await expect(handleChatMessage(ctx, undefined as unknown as HookPayload, {})).resolves.toBeUndefined();
+    await expect(handleChatMessage(ctx, {}, undefined as unknown as HookPayload)).resolves.toBeUndefined();
+    await expect(handleChatMessage(ctx, null as unknown as HookPayload, null as unknown as HookPayload)).resolves.toBeUndefined();
   });
 
   it("handleToolExecuteBefore does not throw on undefined input", async () => {
     const { ctx } = makeHarness();
     await expect(
-      handleToolExecuteBefore(ctx, undefined, {}),
+      handleToolExecuteBefore(ctx, undefined as unknown as HookPayload, {}),
     ).resolves.toBeUndefined();
     await expect(
-      handleToolExecuteBefore(ctx, { sessionID: "sid-x", tool: "read" }, undefined),
+      handleToolExecuteBefore(ctx, { sessionID: "sid-x", tool: "read" }, undefined as unknown as HookPayload),
     ).resolves.toBeUndefined();
     await expect(
-      handleToolExecuteBefore(ctx, null, null),
+      handleToolExecuteBefore(ctx, null as unknown as HookPayload, null as unknown as HookPayload),
     ).resolves.toBeUndefined();
   });
 
   it("handleToolExecuteAfter does not throw on undefined input", async () => {
     const { ctx } = makeHarness();
     await expect(
-      handleToolExecuteAfter(ctx, undefined, {}),
+      handleToolExecuteAfter(ctx, undefined as unknown as HookPayload, {}),
     ).resolves.toBeUndefined();
     await expect(
-      handleToolExecuteAfter(ctx, {}, undefined),
+      handleToolExecuteAfter(ctx, {}, undefined as unknown as HookPayload),
     ).resolves.toBeUndefined();
     await expect(
-      handleToolExecuteAfter(ctx, null, null),
+      handleToolExecuteAfter(ctx, null as unknown as HookPayload, null as unknown as HookPayload),
     ).resolves.toBeUndefined();
   });
 
   it("handleTextComplete does not throw on undefined/empty input", async () => {
     const { ctx } = makeHarness();
-    await expect(handleTextComplete(ctx, undefined, {})).resolves.toBeUndefined();
+    await expect(handleTextComplete(ctx, undefined as unknown as HookPayload, {})).resolves.toBeUndefined();
     await expect(handleTextComplete(ctx, {}, { text: "" })).resolves.toBeUndefined();
     await expect(handleTextComplete(ctx, {}, { text: "short" })).resolves.toBeUndefined();
-    await expect(handleTextComplete(ctx, null, null)).resolves.toBeUndefined();
+    await expect(handleTextComplete(ctx, null as unknown as HookPayload, null as unknown as HookPayload)).resolves.toBeUndefined();
   });
 
   it("handleSessionIdle ignores events that are not session.idle", async () => {
@@ -256,7 +257,7 @@ describe("hook handlers — fail-soft on bad input", () => {
     await expect(
       handleSessionIdle(ctx, { event: undefined }),
     ).resolves.toBeUndefined();
-    await expect(handleSessionIdle(ctx, undefined)).resolves.toBeUndefined();
+    await expect(handleSessionIdle(ctx, undefined as unknown as HookEventPayload)).resolves.toBeUndefined();
   });
 
   it("handleSystemTransform does not throw on partial/empty input that includes a system array", async () => {
@@ -266,13 +267,13 @@ describe("hook handlers — fail-soft on bad input", () => {
     // contract is: missing fields on `input` or subagent/bypass
     // short-circuits never throw.
     await expect(
-      handleSystemTransform(ctx, undefined, { system: [] }),
+      handleSystemTransform(ctx, undefined as unknown as HookPayload, { system: [] }),
     ).resolves.toBeUndefined();
     await expect(
       handleSystemTransform(ctx, {}, { system: [] }),
     ).resolves.toBeUndefined();
     await expect(
-      handleSystemTransform(ctx, null, { system: [] }),
+      handleSystemTransform(ctx, null as unknown as HookPayload, { system: [] }),
     ).resolves.toBeUndefined();
   });
 
