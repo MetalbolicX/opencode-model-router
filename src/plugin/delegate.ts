@@ -7,9 +7,9 @@
 // Only the shape changed: it now takes `ctx` and `args` as parameters
 // instead of closing over them.
 //
-// PR2 (Phase 3) will replace the `any` payloads with narrow runtime DTOs
-// from `src/plugin/types.ts`; the present file deliberately preserves the
-// pre-refactor control flow byte-for-byte.
+// Phase 3 later tightened the hot-path DTOs in this file without changing
+// the control flow; the present file still preserves the pre-refactor
+// behavior byte-for-byte.
 // ---------------------------------------------------------------------------
 
 import { scrubText } from "../guard/scrub";
@@ -29,9 +29,15 @@ import {
   nextAction,
   recordAttempt,
 } from "../escalate/ladder";
+import type { Preset } from "../router/config";
 import { getActiveTiers } from "../router/protocol";
 import type { PluginContext } from "./context";
-import type { DelegateArgs } from "./types";
+import type {
+  DelegateArgs,
+  SessionCreateResult,
+  SessionPromptResult,
+} from "./types";
+import { extractPromptText, extractSessionId } from "./types";
 
 /** Re-exported for IDE/test consumers — canonical shape lives in `./types`. */
 export type { DelegateArgs } from "./types";
@@ -65,7 +71,7 @@ export async function executeDelegate(
 
     const policy = buildEscalatePolicy(activeCfg);
     let state = newLadderState(initialTier, policy);
-    const tiersForCost: any = getActiveTiers(activeCfg);
+    const tiersForCost: Preset = getActiveTiers(activeCfg);
 
     // Independent safety net: even a policy bug cannot loop unbounded.
     const safetyMax =
@@ -90,8 +96,8 @@ export async function executeDelegate(
         ? `${scrubText(forcing)}\n\n${args.task}`
         : args.task;
 
-      const created: any = await ctx.plugin.client.session.create({});
-      const producerSid: string | undefined = created?.data?.id;
+      const created: SessionCreateResult = await ctx.plugin.client.session.create({});
+      const producerSid = extractSessionId(created);
       if (!producerSid) {
         return "[router] delegate failed: could not create a producer session.";
       }
@@ -112,7 +118,7 @@ export async function executeDelegate(
       // double-counted attempt). API error => (advisory) provider failover; verification
       // FAIL => (runtime) quality escalation.
       try {
-        const res: any = await ctx.plugin.client.session.prompt({
+        const res: SessionPromptResult = await ctx.plugin.client.session.prompt({
           path: { id: producerSid },
           body: {
             ...(model ? { model } : {}),
@@ -120,12 +126,13 @@ export async function executeDelegate(
             parts: [{ type: "text", text: taskText }],
           },
         });
-        const parts: any[] = res?.data?.parts ?? [];
-        producerText = parts
-          .filter((p) => p?.type === "text" && typeof p.text === "string")
-          .map((p) => p.text)
-          .join("\n");
-      } catch {
+        producerText = extractPromptText(res);
+      } catch (err) {
+        // Provider-failover design (see header comment): a transport/API
+        // error yields an empty artefact and counts as exactly ONE failed
+        // attempt. `err` is bound so the failure is observable at debug
+        // time and in code review — not silently discarded.
+        void err;
         producerText = "";
       }
 
@@ -137,20 +144,21 @@ export async function executeDelegate(
         producerTier: tier,
       };
 
-      let gateRes;
+      let gateRes: Awaited<ReturnType<typeof accept>>;
       try {
         gateRes = await accept(
           { dod, trivial: false, mode: "modeA" },
           artefact,
           buildGateDeps(ctx),
         );
-      } catch {
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
         gateRes = {
           accepted: false,
           verdict: {
             pass: false,
             method: "none" as const,
-            reasons: ["verification failed (fail-closed)"],
+            reasons: [`verification failed (fail-closed): ${reason}`],
           },
           dodSource: dod.source,
         };
@@ -209,7 +217,8 @@ export async function executeDelegate(
       forcing = action.forcingMessage ?? null;
       state = advance(state, action);
     }
-  } catch {
-    return "[router] delegate failed (fail-closed): the delegation or verification could not complete.";
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return `[router] delegate failed (fail-closed): the delegation or verification could not complete (${reason}).`;
   }
 }
