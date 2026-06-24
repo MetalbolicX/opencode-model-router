@@ -1,7 +1,5 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { RouterConfig } from "../router/config";
+import { writeTrajectoryLog } from "../utils/log";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -213,12 +211,6 @@ export function dumpDelegateScorecard(
   accepted: boolean,
   method: string,
 ): void {
-  try {
-    const line = formatLadderScorecard(state, accepted, method);
-    const dir = join(tmpdir(), "opencode-model-router-trajectory");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${sid}.delegate.log`), line + "\n", { flag: "a" });
-  } catch {
-    // best-effort only
-  }
+  const line = formatLadderScorecard(state, accepted, method);
+  writeTrajectoryLog(sid, line, "delegate");
 }

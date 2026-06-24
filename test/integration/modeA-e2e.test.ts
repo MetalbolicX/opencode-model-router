@@ -13,7 +13,6 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import ModelRouterPlugin from "../../src/index";
-import { invalidateConfigCache } from "../../src/router/config";
 
 // ---------------------------------------------------------------------------
 // Globally unique session counter (prevents duplicate IDs across all tests).
@@ -82,7 +81,6 @@ describe("Mode A end-to-end enforcement loop", () => {
     process.env.USERPROFILE = dir;
     delete process.env.MODEL_ROUTER_ENFORCE;
     process.env.MODEL_ROUTER_VERIFIED_DELEGATE = "1";
-    invalidateConfigCache();
   });
 
   afterEach(() => {
@@ -98,7 +96,6 @@ describe("Mode A end-to-end enforcement loop", () => {
     }
     delete process.env.MODEL_ROUTER_ENFORCE;
     delete process.env.MODEL_ROUTER_VERIFIED_DELEGATE;
-    invalidateConfigCache();
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -191,7 +188,6 @@ describe("Mode A end-to-end enforcement loop", () => {
     );
 
     process.env.MODEL_ROUTER_ENFORCE = "1";
-    invalidateConfigCache();
 
     await hooks["chat.message"](
       { sessionID: "CHILD_T4", agent: "fast" },

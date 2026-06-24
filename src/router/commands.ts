@@ -3,8 +3,6 @@ import { resolveEnforcementMode } from "./enforcement";
 import { getActiveTiers } from "./protocol";
 import {
   resolvePresetName,
-  writeState,
-  invalidateConfigCache,
   saveActivePreset,
   saveActiveMode,
   saveEnforcementMode,
@@ -272,13 +270,13 @@ export function registerRouterCommands(
 export async function handleCommandBefore(
   ctx: PluginContext,
   input: { command: string; arguments?: string },
-  output: { parts: Array<{ type: "text"; text: string }> },
+  // The SDK's `command.execute.before` output is `{ parts: Part[] }` where
+  // `Part` is a discriminated union of text/reasoning/file/tool/etc. We only
+  // push text parts, so a structural supertype is sufficient.
+  output: { parts: Array<{ type: string; text?: string; [key: string]: unknown }> },
 ): Promise<void> {
   if (input.command === "tiers") {
-    let cfg = ctx.getConfig();
-    try {
-      cfg = ctx.refreshConfig();
-    } catch {}
+    const cfg = ctx.getFreshConfig();
     output.parts.push({
       type: "text" as const,
       text: buildTiersOutput(cfg),
@@ -286,10 +284,7 @@ export async function handleCommandBefore(
   }
 
   if (input.command === "preset") {
-    let cfg = ctx.getConfig();
-    try {
-      cfg = ctx.refreshConfig();
-    } catch {}
+    const cfg = ctx.getFreshConfig();
     output.parts.push({
       type: "text" as const,
       text: buildPresetOutput(cfg, input.arguments ?? ""),
@@ -316,10 +311,7 @@ export async function handleCommandBefore(
   }
 
   if (input.command === "budget") {
-    let cfg = ctx.getConfig();
-    try {
-      cfg = ctx.refreshConfig();
-    } catch {}
+    const cfg = ctx.getFreshConfig();
     output.parts.push({
       type: "text" as const,
       text: buildBudgetOutput(cfg, input.arguments ?? ""),
@@ -327,10 +319,7 @@ export async function handleCommandBefore(
   }
 
   if (input.command === "router") {
-    let cfg = ctx.getConfig();
-    try {
-      cfg = ctx.refreshConfig();
-    } catch {}
+    const cfg = ctx.getFreshConfig();
     output.parts.push({
       type: "text" as const,
       text: buildRouterOutput(cfg, input.arguments ?? ""),

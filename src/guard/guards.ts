@@ -1,5 +1,10 @@
 import { fingerprintToolCall } from "./fingerprint";
 import { READ_ONLY_TOOLS } from "../router/sessions";
+import {
+  FINISH_TOOLS,
+  MUTATION_TOOLS,
+  WRITE_TOOLS,
+} from "../router/tools";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,12 +61,6 @@ const REDIRECT_SCRIPT_RE = />\s*\S+\.(mjs|sh|py|js|ts|cjs|bash)\b/i;
 const INLINE_SCRIPT_RE = /\b(node|python3?|deno|bun)\s+-(e|c)\b/i;
 const CAT_WRITE_RE = /\bcat\s+>\s*\S/i;
 const BASH_C_RE = /\bbash\s+-c\b/i;
-
-// ---------------------------------------------------------------------------
-// Write tools set (module-level)
-// ---------------------------------------------------------------------------
-
-const WRITE_TOOLS = new Set(["write", "edit", "patch", "multiedit"]);
 
 // ---------------------------------------------------------------------------
 // newGuardState
@@ -125,9 +124,6 @@ export function isSelfScript(call: GuardCall, policy: GuardPolicy): boolean {
 // ---------------------------------------------------------------------------
 // classify
 // ---------------------------------------------------------------------------
-
-const FINISH_TOOLS = new Set(["finish", "return", "task_complete"]);
-const MUTATION_TOOLS = new Set(["write", "edit", "patch", "bash", "multiedit"]);
 
 export function classify(call: GuardCall, policy: GuardPolicy): GuardKind {
   if (FINISH_TOOLS.has(call.tool)) return "finish";

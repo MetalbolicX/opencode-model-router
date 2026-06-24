@@ -3,7 +3,6 @@ import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  invalidateConfigCache,
   type RouterConfig,
   type TierConfig,
   type Preset,
@@ -31,7 +30,6 @@ beforeEach(() => {
   process.env["HOME"] = tmpHome;
   process.env["USERPROFILE"] = tmpHome;
   delete process.env["MODEL_ROUTER_ENFORCE"];
-  invalidateConfigCache();
 });
 
 afterEach(() => {
@@ -41,7 +39,6 @@ afterEach(() => {
   else process.env["USERPROFILE"] = origUSERPROFILE;
   if (savedEnvGate === undefined) delete process.env["MODEL_ROUTER_ENFORCE"];
   else process.env["MODEL_ROUTER_ENFORCE"] = savedEnvGate;
-  invalidateConfigCache();
 });
 
 /** Build a minimal RouterConfig with two presets and one mode for the unit tests. */

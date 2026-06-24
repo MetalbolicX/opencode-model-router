@@ -6,7 +6,6 @@ import { join } from "node:path";
 import type { PluginContext } from "../../src/plugin/context";
 import type { HookEventPayload, HookPayload } from "../../src/plugin/types";
 import type { RouterConfig, Preset } from "../../src/router/config";
-import { invalidateConfigCache } from "../../src/router/config";
 import {
   handleChatMessage,
   handleChatParams,
@@ -57,7 +56,6 @@ beforeEach(() => {
   tmpCwd = join(tmpHome, "cwd");
   mkdirSync(tmpCwd, { recursive: true });
   process.chdir(tmpCwd);
-  invalidateConfigCache();
 });
 
 afterEach(() => {
@@ -66,7 +64,6 @@ afterEach(() => {
   if (origUSERPROFILE === undefined) delete process.env["USERPROFILE"];
   else process.env["USERPROFILE"] = origUSERPROFILE;
   process.chdir(origCwd);
-  invalidateConfigCache();
   try {
     rmSync(tmpHome, { recursive: true, force: true });
   } catch {
@@ -183,6 +180,7 @@ function makeHarness(opts?: {
     activeTiersAtLoad: preset,
     getConfig: () => cfg,
     refreshConfig: () => cfg,
+    getFreshConfig: () => cfg,
     state: { bypassed: false },
     sessionStore: sessionStore as any,
     trajectoryStore: trajectoryStore as any,

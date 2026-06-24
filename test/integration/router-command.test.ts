@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ModelRouterPlugin from "../../src/index";
 import { resolveEnforcementMode } from "../../src/router/enforcement";
-import { loadConfig, invalidateConfigCache } from "../../src/router/config";
+import { readMergedConfig } from "../../src/router/config-loader";
 
 describe("router-command integration", () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -21,7 +21,6 @@ describe("router-command integration", () => {
     savedUserProfile = process.env.USERPROFILE;
     process.env.HOME = testHomeDir;
     process.env.USERPROFILE = testHomeDir;
-    invalidateConfigCache();
     hooks = await ModelRouterPlugin({} as any);
   });
 
@@ -36,7 +35,6 @@ describe("router-command integration", () => {
     } else {
       process.env.USERPROFILE = savedUserProfile;
     }
-    invalidateConfigCache();
   });
 
   it("enforce enforced persists + reload", async () => {
@@ -44,20 +42,17 @@ describe("router-command integration", () => {
     await hooks["command.execute.before"]({ command: "router", arguments: "enforce enforced" }, out);
     expect(out.parts[0].text).toContain("enforced");
     expect(out.parts[0].text).toContain("persisted");
-    invalidateConfigCache();
-    expect(resolveEnforcementMode({ config: loadConfig(), env: {} }).mode).toBe("enforced");
+    expect(resolveEnforcementMode({ config: readMergedConfig({ cwd: process.cwd() }), env: {} }).mode).toBe("enforced");
   });
 
   it("enforce off persists", async () => {
     // Prime to enforced first so "off" is a meaningful state transition.
     await hooks["command.execute.before"]({ command: "router", arguments: "enforce enforced" }, { parts: [] as any[] });
-    invalidateConfigCache();
 
     const out = { parts: [] as any[] };
     await hooks["command.execute.before"]({ command: "router", arguments: "enforce off" }, out);
     expect(out.parts[0].text).toContain("off");
-    invalidateConfigCache();
-    expect(resolveEnforcementMode({ config: loadConfig(), env: {} }).mode).toBe("off");
+    expect(resolveEnforcementMode({ config: readMergedConfig({ cwd: process.cwd() }), env: {} }).mode).toBe("off");
   });
 
   it("enforce with no mode shows current + usage", async () => {

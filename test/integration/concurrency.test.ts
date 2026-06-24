@@ -3,7 +3,6 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import ModelRouterPlugin from "../../src/index";
-import { invalidateConfigCache } from "../../src/router/config";
 
 describe("concurrency isolation", () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -29,7 +28,6 @@ describe("concurrency isolation", () => {
     process.env.HOME = dir;
     process.env.USERPROFILE = dir;
     process.env.MODEL_ROUTER_ENFORCE = "1";
-    invalidateConfigCache();
 
     const ctx = {
       directory: dir,
@@ -67,7 +65,6 @@ describe("concurrency isolation", () => {
       process.env.USERPROFILE = savedUserProfile;
     }
     delete process.env.MODEL_ROUTER_ENFORCE;
-    invalidateConfigCache();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

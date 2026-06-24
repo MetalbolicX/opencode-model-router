@@ -67,6 +67,11 @@ export interface PluginContext {
   /** Force a fresh read from disk and replace the cached value. */
   refreshConfig(): RouterConfig;
 
+  /** Read the latest config: try a forced refresh, fall back to the cached
+   *  value on read failure. Replaces the 7+ duplicated try/refresh/catch
+   *  blocks that used to live in `commands.ts` and `hooks.ts`. */
+  getFreshConfig(): RouterConfig;
+
   /** Mutable per-plugin runtime state (bypass flag). */
   state: PluginState;
 
@@ -114,6 +119,16 @@ export function createPluginContext(plugin: PluginInput): PluginContext {
     },
     refreshConfig(): RouterConfig {
       return configStore.refresh();
+    },
+    getFreshConfig(): RouterConfig {
+      try {
+        return this.refreshConfig();
+      } catch {
+        // Best-effort: a disk-read error must never crash a real session.
+        // Fall back to the cached config so callers can keep using the last
+        // known good value.
+        return this.getConfig();
+      }
     },
     state: {
       bypassed: false,

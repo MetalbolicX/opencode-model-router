@@ -12,7 +12,6 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import ModelRouterPlugin from "../../src/index";
-import { invalidateConfigCache } from "../../src/router/config";
 
 // ---------------------------------------------------------------------------
 // Globally unique session counter (prevents duplicate IDs across all tests).
@@ -81,7 +80,6 @@ describe("Layer-3 escalation ladder wiring", () => {
     process.env.USERPROFILE = dir;
     delete process.env.MODEL_ROUTER_ENFORCE;
     process.env.MODEL_ROUTER_VERIFIED_DELEGATE = "1";
-    invalidateConfigCache();
   });
 
   afterEach(() => {
@@ -97,7 +95,6 @@ describe("Layer-3 escalation ladder wiring", () => {
     }
     delete process.env.MODEL_ROUTER_ENFORCE;
     delete process.env.MODEL_ROUTER_VERIFIED_DELEGATE;
-    invalidateConfigCache();
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {

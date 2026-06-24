@@ -14,7 +14,6 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import ModelRouterPlugin from "../../src/index";
-import { invalidateConfigCache } from "../../src/router/config";
 import { parseDoDFromAnnotation, parseDoDFromDispatch } from "../../src/verify/dod";
 
 // ---------------------------------------------------------------------------
@@ -84,7 +83,6 @@ describe("Mode B end-to-end (plan-annotation)", () => {
     process.env.USERPROFILE = dir;
     delete process.env.MODEL_ROUTER_ENFORCE;
     process.env.MODEL_ROUTER_VERIFIED_DELEGATE = "1";
-    invalidateConfigCache();
   });
 
   afterEach(() => {
@@ -100,7 +98,6 @@ describe("Mode B end-to-end (plan-annotation)", () => {
     }
     delete process.env.MODEL_ROUTER_ENFORCE;
     delete process.env.MODEL_ROUTER_VERIFIED_DELEGATE;
-    invalidateConfigCache();
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {

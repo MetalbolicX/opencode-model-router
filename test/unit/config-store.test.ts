@@ -3,8 +3,8 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createConfigStore, readMergedConfig } from "../../src/router/config-store";
-import { invalidateConfigCache } from "../../src/router/config";
+import { createConfigStore } from "../../src/router/config-store";
+import { readMergedConfig } from "../../src/router/config-loader";
 
 // ---------------------------------------------------------------------------
 // Per-instance ConfigStore contract tests.
@@ -43,8 +43,6 @@ beforeEach(() => {
   tmpCwd = join(tmpHome, "cwd");
   mkdirSync(tmpCwd, { recursive: true });
   process.chdir(tmpCwd);
-
-  invalidateConfigCache();
 });
 
 afterEach(() => {
@@ -53,7 +51,6 @@ afterEach(() => {
   if (origUSERPROFILE === undefined) delete process.env["USERPROFILE"];
   else process.env["USERPROFILE"] = origUSERPROFILE;
   process.chdir(origCwd);
-  invalidateConfigCache();
   try {
     rmSync(tmpHome, { recursive: true, force: true });
   } catch {

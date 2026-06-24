@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createPluginContext } from "../../src/plugin/context";
-import { invalidateConfigCache } from "../../src/router/config";
 
 // ---------------------------------------------------------------------------
 // PluginContext wiring tests.
@@ -37,8 +36,6 @@ beforeEach(() => {
   tmpCwd = join(tmpHome, "cwd");
   mkdirSync(tmpCwd, { recursive: true });
   process.chdir(tmpCwd);
-
-  invalidateConfigCache();
 });
 
 afterEach(() => {
@@ -47,7 +44,6 @@ afterEach(() => {
   if (origUSERPROFILE === undefined) delete process.env["USERPROFILE"];
   else process.env["USERPROFILE"] = origUSERPROFILE;
   process.chdir(origCwd);
-  invalidateConfigCache();
   try {
     rmSync(tmpHome, { recursive: true, force: true });
   } catch {
@@ -150,19 +146,21 @@ describe("createPluginContext — two-instance isolation", () => {
     expect(ctxB.getConfig().activePreset).toBe("google");
   });
 
-  it("contexts do not share the legacy module-level cache", () => {
-    // If the contexts accidentally delegated to loadConfig(), then
-    // invalidateConfigCache() between two reads on the SAME context
-    // would NOT change behaviour (because the cache stays valid).
-    // Instead we assert that two contexts are independent: invalidateConfigCache
-    // only affects the legacy module-level singleton, not the per-instance stores.
+  it("per-instance ConfigStore cache is private — invalidating one context's store does not touch another", () => {
+    // The two-context isolation property the singleton design failed to
+    // provide is now asserted directly: the ConfigStore inside ctxA has
+    // its own cache, distinct from ctxB's. (This used to be phrased as
+    // a comment about invalidateConfigCache; after PR2 task 2.7 the
+    // legacy singleton no longer exists, so the property is now tested
+    // via the per-instance store API.)
     const ctxA = createPluginContext(makePluginInput(tmpCwd) as any);
-    const first = ctxA.getConfig();
-    invalidateConfigCache();
-    const second = ctxA.getConfig();
-    // ctxA's ConfigStore was already cached, so invalidateConfigCache
-    // (which clears the module-level singleton) does not affect ctxA.
-    expect(second.activePreset).toBe(first.activePreset);
+    const ctxB = createPluginContext(makePluginInput(tmpCwd) as any);
+    const a = ctxA.getConfig();
+    const b = ctxB.getConfig();
+    // Both contexts share disk state; both initial reads return equivalent values.
+    expect(a.activePreset).toBe(b.activePreset);
+    // But the references are distinct (per-instance cache).
+    expect(a).not.toBe(b);
   });
 });
 

@@ -4,8 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   readState,
-  loadConfig,
-  invalidateConfigCache,
   saveActivePreset,
   saveActiveMode,
   saveEnforcementMode,
@@ -14,6 +12,7 @@ import {
   configPath as realConfigPath,
   configPath,
 } from "../../src/router/config";
+import { readMergedConfig } from "../../src/router/config-loader";
 import { createConfigStore } from "../../src/router/config-store";
 
 let tmpHome: string;
@@ -37,8 +36,6 @@ beforeEach(() => {
   tmpCwd = join(tmpHome, "cwd");
   mkdirSync(tmpCwd, { recursive: true });
   process.chdir(tmpCwd);
-
-  invalidateConfigCache();
 });
 
 afterEach(() => {
@@ -47,7 +44,6 @@ afterEach(() => {
   if (origUSERPROFILE === undefined) delete process.env["USERPROFILE"];
   else process.env["USERPROFILE"] = origUSERPROFILE;
   process.chdir(origCwd);
-  invalidateConfigCache();
 });
 
 describe("saveActivePreset", () => {
@@ -76,10 +72,9 @@ describe("saveActivePreset", () => {
     expect(readState().activePreset).toBeUndefined();
   });
 
-  it("invalidateConfigCache makes the next loadConfig re-read state", () => {
+  it("persisted preset is reflected on the next readMergedConfig call", () => {
     saveActivePreset("anthropic");
-    invalidateConfigCache();
-    expect(loadConfig().activePreset).toBe("anthropic");
+    expect(readMergedConfig({ cwd: process.cwd() }).activePreset).toBe("anthropic");
   });
 });
 
@@ -187,7 +182,7 @@ describe("Layered config — bundled-only (no overrides)", () => {
   it("loads bundled defaults when global and local are absent", () => {
     clearGlobal();
     clearLocal();
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     // Bundled tiers.json sets activePreset to "multi-provider" by default.
     expect(cfg.activePreset).toBe("multi-provider");
     expect(cfg.presets["anthropic"]).toBeDefined();
@@ -199,7 +194,7 @@ describe("Layered config — precedence table", () => {
   it("global scalar overrides bundled scalar; unrelated bundled fields preserved", () => {
     stageGlobal({ activePreset: "openai" });
     clearLocal();
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.activePreset).toBe("openai");
     // Bundled's anthropic preset is unrelated and must survive.
     expect(cfg.presets["anthropic"]).toBeDefined();
@@ -209,7 +204,7 @@ describe("Layered config — precedence table", () => {
   it("local scalar overrides bundled scalar when global is absent", () => {
     clearGlobal();
     stageLocal({ activePreset: "github-copilot" });
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.activePreset).toBe("github-copilot");
     expect(cfg.presets["anthropic"]).toBeDefined();
   });
@@ -217,7 +212,7 @@ describe("Layered config — precedence table", () => {
   it("local wins over global when both present", () => {
     stageGlobal({ activePreset: "openai" });
     stageLocal({ activePreset: "google" });
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.activePreset).toBe("google");
   });
 
@@ -225,7 +220,7 @@ describe("Layered config — precedence table", () => {
     // Bundled has anthropic; global pushes it to openai; local pushes it to google.
     stageGlobal({ activePreset: "openai" });
     stageLocal({ activePreset: "google" });
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.activePreset).toBe("google");
   });
 
@@ -242,7 +237,7 @@ describe("Layered config — precedence table", () => {
         },
       },
     });
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     const fast = cfg.presets["anthropic"]?.["fast"];
     expect(fast?.whenToUse).toEqual(["only-this-one"]);
   });
@@ -260,7 +255,7 @@ describe("Layered config — precedence table", () => {
       },
     });
     clearLocal();
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     const fast = cfg.presets["anthropic"]?.["fast"];
     expect(fast?.whenToUse).toEqual(["override-1", "override-2"]);
   });
@@ -271,7 +266,7 @@ describe("Layered config — precedence table", () => {
       tierPrompts: { extra: "global-only prompt" },
     });
     clearLocal();
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.tierPrompts?.["fast"]).toBeDefined();
     expect(cfg.tierPrompts?.["extra"]).toBe("global-only prompt");
   });
@@ -289,7 +284,7 @@ describe("Layered config — precedence table", () => {
       },
     });
     clearLocal();
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     const fast = cfg.presets["anthropic"]?.["fast"];
     expect(fast?.model).toBe("different/model");
     // Other anthropic tiers must survive the global override.
@@ -301,7 +296,7 @@ describe("Layered config — precedence table", () => {
     // Bundled has tierCaps.fast/medium/heavy; global sets tierCaps.fast = 99.
     stageGlobal({ tierCaps: { fast: 99 } });
     clearLocal();
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.tierCaps?.["fast"]).toBe(99);
     expect(cfg.tierCaps?.["medium"]).toBeDefined();
     expect(cfg.tierCaps?.["heavy"]).toBeDefined();
@@ -312,28 +307,28 @@ describe("Layered config — absence cases", () => {
   it("missing global and local falls through to bundled defaults", () => {
     clearGlobal();
     clearLocal();
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.activePreset).toBe("multi-provider");
   });
 
   it("missing global only falls through to bundled (local wins over bundled)", () => {
     clearGlobal();
     stageLocal({ activePreset: "openai" });
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.activePreset).toBe("openai");
   });
 
   it("missing local only falls through to bundled (global wins over bundled)", () => {
     stageGlobal({ activePreset: "openai" });
     clearLocal();
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.activePreset).toBe("openai");
   });
 
   it("an empty-object local override is a no-op merge", () => {
     stageGlobal({ activePreset: "openai" });
     stageLocal({});
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.activePreset).toBe("openai");
     // Bundled's anthropic preset remains intact.
     expect(cfg.presets["anthropic"]).toBeDefined();
@@ -343,7 +338,7 @@ describe("Layered config — absence cases", () => {
     clearGlobal();
     stageLocal({ activePreset: "google" });
     stageGlobal({});
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.activePreset).toBe("google");
   });
 });
@@ -352,27 +347,27 @@ describe("Layered config — error cases", () => {
   it("throws with global path when global contains malformed JSON", () => {
     stageGlobal("{not valid json");
     clearLocal();
-    expect(() => loadConfig()).toThrow(/global/);
-    expect(() => loadConfig()).toThrow(/malformed JSON/);
+    expect(() => readMergedConfig({ cwd: process.cwd() })).toThrow(/global/);
+    expect(() => readMergedConfig({ cwd: process.cwd() })).toThrow(/malformed JSON/);
   });
 
   it("throws with local path when local contains malformed JSON", () => {
     clearGlobal();
     stageLocal("{not valid json");
-    expect(() => loadConfig()).toThrow(/local/);
-    expect(() => loadConfig()).toThrow(/malformed JSON/);
+    expect(() => readMergedConfig({ cwd: process.cwd() })).toThrow(/local/);
+    expect(() => readMergedConfig({ cwd: process.cwd() })).toThrow(/malformed JSON/);
   });
 
   it("throws when a global file is empty (empty string is not valid JSON)", () => {
     stageGlobal("");
     clearLocal();
-    expect(() => loadConfig()).toThrow(/global/);
+    expect(() => readMergedConfig({ cwd: process.cwd() })).toThrow(/global/);
   });
 
   it("throws when a local file is empty", () => {
     clearGlobal();
     stageLocal("");
-    expect(() => loadConfig()).toThrow(/local/);
+    expect(() => readMergedConfig({ cwd: process.cwd() })).toThrow(/local/);
   });
 
   it("throws when bundled layer is unreadable", () => {
@@ -383,10 +378,9 @@ describe("Layered config — error cases", () => {
     const backupPath = bundledPath + ".bak-test";
     renameSync(bundledPath, backupPath);
     try {
-      expect(() => loadConfig()).toThrow(/bundled/);
+      expect(() => readMergedConfig({ cwd: process.cwd() })).toThrow(/bundled/);
     } finally {
       renameSync(backupPath, bundledPath);
-      invalidateConfigCache();
     }
   });
 });
@@ -396,14 +390,14 @@ describe("Layered config — state overlay", () => {
     clearGlobal();
     clearLocal();
     saveActivePreset("openai");
-    expect(loadConfig().activePreset).toBe("openai");
+    expect(readMergedConfig({ cwd: process.cwd() }).activePreset).toBe("openai");
   });
 
   it("state.activePreset wins over global manual layer", () => {
     stageGlobal({ activePreset: "google" });
     clearLocal();
     saveActivePreset("openai");
-    expect(loadConfig().activePreset).toBe("openai");
+    expect(readMergedConfig({ cwd: process.cwd() }).activePreset).toBe("openai");
   });
 
   it("state.activeMode wins over manual activeMode when state mode exists", () => {
@@ -411,7 +405,7 @@ describe("Layered config — state overlay", () => {
     clearLocal();
     // bundled tiers.json already has modes.normal/budget/quality/deep.
     saveActiveMode("budget");
-    expect(loadConfig().activeMode).toBe("budget");
+    expect(readMergedConfig({ cwd: process.cwd() }).activeMode).toBe("budget");
   });
 
   it("state.activeMode is ignored when mode does not exist in cfg.modes", () => {
@@ -419,28 +413,28 @@ describe("Layered config — state overlay", () => {
     clearLocal();
     saveActiveMode("not-a-real-mode");
     // bundled activeMode is "normal" — must be preserved.
-    expect(loadConfig().activeMode).toBe("normal");
+    expect(readMergedConfig({ cwd: process.cwd() }).activeMode).toBe("normal");
   });
 
   it("state.enforcementMode wins; cfg.enforcement is created if missing", () => {
     clearGlobal();
     clearLocal();
     saveEnforcementMode("enforced");
-    expect(loadConfig().enforcement?.mode).toBe("enforced");
+    expect(readMergedConfig({ cwd: process.cwd() }).enforcement?.mode).toBe("enforced");
   });
 
   it("state.enforcementMode wins over manual enforcement.mode in merged layers", () => {
     stageGlobal({ enforcement: { mode: "off" } });
     clearLocal();
     saveEnforcementMode("enforced");
-    expect(loadConfig().enforcement?.mode).toBe("enforced");
+    expect(readMergedConfig({ cwd: process.cwd() }).enforcement?.mode).toBe("enforced");
   });
 
   it("manual activePreset is preserved when no state is written", () => {
     clearGlobal();
     clearLocal();
     // No saveActivePreset call — bundled default must remain.
-    expect(loadConfig().activePreset).toBe("multi-provider");
+    expect(readMergedConfig({ cwd: process.cwd() }).activePreset).toBe("multi-provider");
   });
 
   it("state overlay does not leak into unrelated manual fields", () => {
@@ -457,49 +451,37 @@ describe("Layered config — state overlay", () => {
     });
     clearLocal();
     saveActivePreset("openai");
-    const cfg = loadConfig();
+    const cfg = readMergedConfig({ cwd: process.cwd() });
     expect(cfg.activePreset).toBe("openai");
     // Manual nested override must survive the state overlay.
     expect(cfg.presets["anthropic"]?.["fast"]?.whenToUse).toEqual(["only-this"]);
   });
 });
 
-describe("Layered config — cwd change requires cache invalidation", () => {
-  it("without invalidateConfigCache, changing cwd returns the cached local result", () => {
-    stageLocal({ activePreset: "openai" });
-    expect(loadConfig().activePreset).toBe("openai");
+describe("Layered config — readMergedConfig is always fresh", () => {
+  // After PR2 task 2.7, the legacy module-level cache is gone. Every
+  // readMergedConfig({ cwd }) call re-reads from disk, so cwd changes and
+  // file edits are immediately visible. These tests exercise the new
+  // contract directly.
 
-    // Move to a different cwd with NO local override. The cache still holds
-    // the previous local-overriding result until invalidated.
-    const otherCwd = join(tmpHome, "no-local");
-    mkdirSync(otherCwd, { recursive: true });
-    process.chdir(otherCwd);
-    expect(loadConfig().activePreset).toBe("openai");
-  });
-
-  it("after invalidateConfigCache, changing cwd re-resolves the local layer", () => {
+  it("changing cwd is reflected on the next readMergedConfig (no manual invalidation needed)", () => {
     stageLocal({ activePreset: "openai" });
-    expect(loadConfig().activePreset).toBe("openai");
+    expect(readMergedConfig({ cwd: process.cwd() }).activePreset).toBe("openai");
 
     const otherCwd = join(tmpHome, "no-local");
     mkdirSync(otherCwd, { recursive: true });
     process.chdir(otherCwd);
-    invalidateConfigCache();
-    // Bundled default wins back once cache is cleared and cwd no longer has a local file.
-    expect(loadConfig().activePreset).toBe("multi-provider");
+    // Bundled default wins because the new cwd has no local override.
+    expect(readMergedConfig({ cwd: process.cwd() }).activePreset).toBe("multi-provider");
   });
 
-  it("editing the local file in place does NOT reload until cache is invalidated", () => {
+  it("editing the local file in place IS reflected on the next read", () => {
     stageLocal({ activePreset: "openai" });
-    expect(loadConfig().activePreset).toBe("openai");
+    expect(readMergedConfig({ cwd: process.cwd() }).activePreset).toBe("openai");
 
     // Mutate the local file on disk.
     stageLocal({ activePreset: "google" });
-    // Still the cached value.
-    expect(loadConfig().activePreset).toBe("openai");
-
-    invalidateConfigCache();
-    expect(loadConfig().activePreset).toBe("google");
+    expect(readMergedConfig({ cwd: process.cwd() }).activePreset).toBe("google");
   });
 });
 
@@ -536,10 +518,14 @@ describe("Per-instance ConfigStore — two-instance isolation", () => {
     expect(storeB.read().activePreset).toBe("multi-provider");
   });
 
-  it("invalidateConfigCache (legacy) does not affect a ConfigStore's cache", () => {
+  it("a ConfigStore's cache survives a fresh readMergedConfig call (no cross-pollination)", () => {
+    // After PR2 task 2.7, readMergedConfig is a pure read; it does not
+    // touch any ConfigStore's cache. This was the contract the old
+    // invalidateConfigCache(legacy) test asserted indirectly — now we
+    // assert it directly on the public surface.
     const store = createConfigStore({ cwd: tmpCwd });
     const before = store.read().activePreset;
-    invalidateConfigCache();
+    readMergedConfig({ cwd: process.cwd() });
     expect(store.read().activePreset).toBe(before);
   });
 });

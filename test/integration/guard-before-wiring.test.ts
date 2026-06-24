@@ -3,7 +3,6 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import ModelRouterPlugin from "../../src/index";
-import { invalidateConfigCache } from "../../src/router/config";
 
 describe("guard-before-wiring integration", () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -24,7 +23,6 @@ describe("guard-before-wiring integration", () => {
     process.env.HOME = dir;
     process.env.USERPROFILE = dir;
     delete process.env.MODEL_ROUTER_ENFORCE;
-    invalidateConfigCache();
     hooks = await ModelRouterPlugin({} as any);
     // Register "SUB" as a subagent session by passing agent:"fast"
     // which matches the "fast" tier key in the default anthropic preset.
@@ -41,7 +39,6 @@ describe("guard-before-wiring integration", () => {
     else process.env.HOME = savedHome;
     if (savedUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = savedUserProfile;
-    invalidateConfigCache();
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {

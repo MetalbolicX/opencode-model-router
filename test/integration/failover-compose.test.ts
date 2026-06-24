@@ -13,7 +13,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { readFileSync } from "node:fs";
 import ModelRouterPlugin from "../../src/index";
-import { invalidateConfigCache, validateConfig } from "../../src/router/config";
+import { validateConfig } from "../../src/router/config";
 import { assembleSystemPrompt } from "../../src/router/protocol";
 
 // ---------------------------------------------------------------------------
@@ -64,7 +64,6 @@ describe("Phase 3.3 — provider-failover / quality-escalation orthogonality", (
     process.env.USERPROFILE = dir;
     delete process.env.MODEL_ROUTER_ENFORCE;
     process.env.MODEL_ROUTER_VERIFIED_DELEGATE = "1";
-    invalidateConfigCache();
   });
 
   afterEach(() => {
@@ -80,7 +79,6 @@ describe("Phase 3.3 — provider-failover / quality-escalation orthogonality", (
     }
     delete process.env.MODEL_ROUTER_ENFORCE;
     delete process.env.MODEL_ROUTER_VERIFIED_DELEGATE;
-    invalidateConfigCache();
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {
