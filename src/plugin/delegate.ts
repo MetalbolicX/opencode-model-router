@@ -31,6 +31,7 @@ import {
 } from "../escalate/ladder";
 import type { Preset } from "../router/config";
 import { getActiveTiers } from "../router/protocol";
+import { withTimeout } from "../utils/timeout";
 import type { PluginContext } from "./context";
 import type {
   DelegateArgs,
@@ -97,8 +98,12 @@ export const executeDelegate = async (
         ? `${scrubText(forcing)}\n\n${args.task}`
         : args.task;
 
-      const created: SessionCreateResult = await ctx.plugin.client.session.create(
-        parentSessionID ? { body: { parentID: parentSessionID } } : {},
+      const created: SessionCreateResult = await withTimeout(
+        ctx.plugin.client.session.create(
+          parentSessionID ? { body: { parentID: parentSessionID } } : {},
+        ),
+        30_000,
+        "session.create",
       );
       const producerSid = extractSessionId(created);
       if (!producerSid) {
@@ -111,114 +116,122 @@ export const executeDelegate = async (
         // non-fatal
       }
 
-      const model = tierModel(activeCfg, tier) ?? undefined;
-      producerText = "";
-      // Provider-failover vs quality-escalation precedence (Phase 3.3):
-      // Provider-failover is advisory only — a text chain injected into the orchestrator
-      // system prompt (buildFallbackInstructions). It is orthogonal to this runtime ladder.
-      // A transport/API error here is caught, yields an empty artefact, and is treated as
-      // exactly ONE failed attempt by the quality-escalation ladder (no provider swap, no
-      // double-counted attempt). API error => (advisory) provider failover; verification
-      // FAIL => (runtime) quality escalation.
       try {
-        const res: SessionPromptResult = await ctx.plugin.client.session.prompt({
-          path: { id: producerSid },
-          body: {
-            ...(model ? { model } : {}),
-            ...(tier ? { agent: tier } : {}),
-            parts: [{ type: "text", text: taskText }],
-          },
-        });
-        producerText = extractPromptText(res);
-      } catch (err) {
-        // Provider-failover design (see header comment): a transport/API
-        // error yields an empty artefact and counts as exactly ONE failed
-        // attempt. `err` is bound so the failure is observable at debug
-        // time and in code review — not silently discarded.
-        void err;
+        const model = tierModel(activeCfg, tier) ?? undefined;
         producerText = "";
-      }
+        // Provider-failover vs quality-escalation precedence (Phase 3.3):
+        // Provider-failover is advisory only — a text chain injected into the orchestrator
+        // system prompt (buildFallbackInstructions). It is orthogonal to this runtime ladder.
+        // A transport/API error here is caught, yields an empty artefact, and is treated as
+        // exactly ONE failed attempt by the quality-escalation ladder (no provider swap, no
+        // double-counted attempt). API error => (advisory) provider failover; verification
+        // FAIL => (runtime) quality escalation.
+        try {
+          const res: SessionPromptResult = await withTimeout(
+            ctx.plugin.client.session.prompt({
+              path: { id: producerSid },
+              body: {
+                ...(model ? { model } : {}),
+                ...(tier ? { agent: tier } : {}),
+                parts: [{ type: "text", text: taskText }],
+              },
+            }),
+            600_000,
+            "session.prompt (producer)",
+          );
+          producerText = extractPromptText(res);
+        } catch (err) {
+          // Provider-failover design (see header comment): a transport/API
+          // error yields an empty artefact and counts as exactly ONE failed
+          // attempt. `err` is bound so the failure is observable at debug
+          // time and in code review — not silently discarded.
+          void err;
+          producerText = "";
+        }
 
-      const artefact = {
-        changedFiles: ctx.changedFileStore.get(producerSid),
-        finalReturnText: producerText,
-        declaredOutputs: dod.deliverable ? [dod.deliverable] : [],
-        producerSessionID: producerSid,
-        producerTier: tier,
-      };
-
-      let gateRes: Awaited<ReturnType<typeof accept>>;
-      try {
-        gateRes = await accept(
-          { dod, trivial: false, mode: "modeA" },
-          artefact,
-          buildGateDeps(ctx, parentSessionID),
-        );
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        gateRes = {
-          accepted: false,
-          verdict: {
-            pass: false,
-            method: "none" as const,
-            reasons: [`verification failed (fail-closed): ${reason}`],
-          },
-          dodSource: dod.source,
+        const artefact = {
+          changedFiles: ctx.changedFileStore.get(producerSid),
+          finalReturnText: producerText,
+          declaredOutputs: dod.deliverable ? [dod.deliverable] : [],
+          producerSessionID: producerSid,
+          producerTier: tier,
         };
-      }
 
-      // Per-attempt cleanup (drop producer session tracking + state).
-      ctx.changedFileStore.clear(producerSid);
-      try {
-        ctx.sessionStore.unregister(producerSid);
-      } catch {
-        // non-fatal
-      }
-      try {
-        ctx.guardStore.clear(producerSid);
-      } catch {
-        // non-fatal
-      }
+        let gateRes: Awaited<ReturnType<typeof accept>>;
+        try {
+          gateRes = await accept(
+            { dod, trivial: false, mode: "modeA" },
+            artefact,
+            buildGateDeps(ctx, parentSessionID),
+          );
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          gateRes = {
+            accepted: false,
+            verdict: {
+              pass: false,
+              method: "none" as const,
+              reasons: [`verification failed (fail-closed): ${reason}`],
+            },
+            dodSource: dod.source,
+          };
+        }
 
-      const costRatio =
-        typeof tiersForCost?.[tier]?.costRatio === "number"
-          ? tiersForCost[tier].costRatio
-          : 1;
-      state = recordAttempt(state, costRatio);
+        const costRatio =
+          typeof tiersForCost?.[tier]?.costRatio === "number"
+            ? tiersForCost[tier].costRatio
+            : 1;
+        state = recordAttempt(state, costRatio);
 
-      const action = nextAction(
-        state,
-        { pass: gateRes.accepted, reasons: gateRes.verdict.reasons },
-        policy,
-      );
-
-      if (action.action === "accept") {
-        dumpDelegateScorecard(
-          producerSid,
+        const action = nextAction(
           state,
-          true,
-          gateRes.verdict.method,
+          { pass: gateRes.accepted, reasons: gateRes.verdict.reasons },
+          policy,
         );
-        return producerText + buildAcceptedSuffix(gateRes.verdict.method);
+
+        if (action.action === "accept") {
+          dumpDelegateScorecard(
+            producerSid,
+            state,
+            true,
+            gateRes.verdict.method,
+          );
+          return producerText + buildAcceptedSuffix(gateRes.verdict.method);
+        }
+        if (action.action === "give_up") {
+          dumpDelegateScorecard(
+            producerSid,
+            state,
+            false,
+            gateRes.verdict.method,
+          );
+          const note = scrubText(buildForcingNote(gateRes.verdict.reasons));
+          return (
+            `[router status: unmet] The delegated result was not accepted after ` +
+            `${state.totalAttempts} attempt(s) across ${state.escalations} escalation(s) ` +
+            `(final tier ${state.currentTier}; ${action.reason ?? "verification failed"}).\n\n` +
+            `${scrubText(producerText)}\n\n${note}`
+          );
+        }
+        // retry or escalate
+        forcing = action.forcingMessage ?? null;
+        state = advance(state, action);
+      } finally {
+        // Per-attempt cleanup (drop producer session tracking + state).
+        // Always runs — even on timeout or throw from session.prompt / gate —
+        // so a single stuck subagent cannot leak tracking entries forever.
+        ctx.changedFileStore.clear(producerSid);
+        try {
+          ctx.sessionStore.unregister(producerSid);
+        } catch {
+          // non-fatal
+        }
+        try {
+          ctx.guardStore.clear(producerSid);
+        } catch {
+          // non-fatal
+        }
       }
-      if (action.action === "give_up") {
-        dumpDelegateScorecard(
-          producerSid,
-          state,
-          false,
-          gateRes.verdict.method,
-        );
-        const note = scrubText(buildForcingNote(gateRes.verdict.reasons));
-        return (
-          `[router status: unmet] The delegated result was not accepted after ` +
-          `${state.totalAttempts} attempt(s) across ${state.escalations} escalation(s) ` +
-          `(final tier ${state.currentTier}; ${action.reason ?? "verification failed"}).\n\n` +
-          `${scrubText(producerText)}\n\n${note}`
-        );
-      }
-      // retry or escalate
-      forcing = action.forcingMessage ?? null;
-      state = advance(state, action);
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);

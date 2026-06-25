@@ -30,6 +30,7 @@ import {
   type SessionPromptResult,
 } from "../plugin/types";
 import { WRITE_TOOLS } from "../router/tools";
+import { withTimeout } from "../utils/timeout";
 
 export interface ChangedFile {
   path: string;
@@ -199,22 +200,30 @@ export const dispatchGrader = async (
   parentSessionID?: string,
 ): Promise<{ sessionID: string; text: string }> => {
   const cfg = ctx.getConfig();
-  const created = (await ctx.plugin.client.session.create(
-    parentSessionID ? { body: { parentID: parentSessionID } } : {},
-  )) as SessionCreateResult;
+  const created = await withTimeout(
+    ctx.plugin.client.session.create(
+      parentSessionID ? { body: { parentID: parentSessionID } } : {},
+    ) as Promise<SessionCreateResult>,
+    30_000,
+    "grader session.create",
+  );
   const sid = extractSessionId(created);
   if (!sid) return { sessionID: "", text: "" };
   ctx.graderSessions.add(sid);
   try {
     const model = tierModel(cfg, req.tier) ?? undefined;
-    const res = (await ctx.plugin.client.session.prompt({
-      path: { id: sid },
-      body: {
-        ...(model ? { model } : {}),
-        system: req.system,
-        parts: [{ type: "text", text: req.prompt }],
-      },
-    })) as SessionPromptResult;
+    const res = await withTimeout(
+      ctx.plugin.client.session.prompt({
+        path: { id: sid },
+        body: {
+          ...(model ? { model } : {}),
+          system: req.system,
+          parts: [{ type: "text", text: req.prompt }],
+        },
+      }) as Promise<SessionPromptResult>,
+      120_000,
+      "grader session.prompt",
+    );
     const text = extractPromptText(res);
     return { sessionID: sid, text };
   } finally {
@@ -249,12 +258,18 @@ export const buildGateDeps = (
 /** Adapter for `tool.execute.after`: when a built-in `task` call should be
  *  verify-dispatched, parse the result, build a DoD, run the gate, and append
  *  a forcing note to `output.output` on rejection. Fail-closed: any throw is
- *  swallowed so the after-hook never crashes a real session. */
+ *  swallowed so the after-hook never crashes a real session.
+ *
+ *  The `_parentSessionID?` parameter is kept for API compatibility but is
+ *  intentionally ignored: forwarding it caused the SDK to attempt to create
+ *  child sessions of subagent sessions, which hangs the opencode runtime
+ *  permanently (SDD change: fix-subagent-session-hang). Grader sessions are
+ *  always created parentless. */
 export const verifyTaskAfterHook = async (
   ctx: PluginContext,
   input: unknown,
   output: Record<string, unknown>,
-  parentSessionID?: string,
+  _parentSessionID?: string,
 ): Promise<void> => {
   const inputRec = (input ?? {}) as Record<string, unknown>;
   const toolName = inputRec["tool"];
@@ -291,7 +306,7 @@ export const verifyTaskAfterHook = async (
     const res = await accept(
       { dod, trivial, mode: "modeA" },
       artefact,
-      buildGateDeps(ctx, parentSessionID),
+      buildGateDeps(ctx),
     );
     if (!res.accepted && !res.verdict.skipped) {
       const ladder = activeCfg.enforcement?.escalate?.ladder ?? ["fast", "medium", "heavy"];

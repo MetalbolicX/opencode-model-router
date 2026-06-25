@@ -808,3 +808,73 @@ describe("executeDelegate — parentSessionID propagation", () => {
     })).toBe(true);
   });
 });
+
+describe("executeDelegate — timeout handling", () => {
+  it("does not hang when session.create rejects with a timeout error", async () => {
+    // Simulate the withTimeout-rejected error shape (what session.create
+    // would throw after the 30s timeout). We avoid the actual 30s wait by
+    // throwing immediately with the same error message contract. The key
+    // invariant is that executeDelegate returns promptly (fail-closed) and
+    // surfaces the timeout reason — NOT hangs forever.
+    const { ctx } = makeCtx({
+      createImpl: async () => {
+        throw new Error("session.create timed out after 30000ms");
+      },
+    });
+    const result = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(result).toContain("delegate failed (fail-closed)");
+    expect(result).toContain("timed out after");
+  });
+
+  it("treats timeout on session.prompt as a failed attempt (ladder retries)", async () => {
+    // session.create works (returns a fresh sid); session.prompt hangs →
+    // withTimeout rejects with a timeout-shaped error → the existing inner
+    // catch produces an empty artefact → the ladder treats this as one
+    // failed attempt and eventually gives up with "unmet".
+    acceptMock.mockResolvedValue({
+      accepted: false,
+      verdict: { pass: false, method: "deterministic", reasons: ["empty artefact"] },
+      dodSource: "inferred",
+    });
+    const { ctx } = makeCtx({
+      createImpl: async () => ({ data: { id: "sess_timeout" } }),
+      promptImpl: async () => {
+        throw new Error("session.prompt (producer) timed out after 600000ms");
+      },
+    });
+    const result = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(result).toContain("unmet");
+  });
+
+  it("cleans up producer session state after prompt timeout", async () => {
+    // Track calls to the sessionStore.unregister and guardStore.clear to
+    // prove the finally block ran on prompt timeout.
+    const unregisterCalls: string[] = [];
+    const clearCalls: string[] = [];
+    acceptMock.mockResolvedValue({
+      accepted: false,
+      verdict: { pass: false, method: "deterministic", reasons: ["empty artefact"] },
+      dodSource: "inferred",
+    });
+    const { ctx } = makeCtx({
+      createImpl: async () => ({ data: { id: "sess_to_cleanup" } }),
+      promptImpl: async () => {
+        throw new Error("session.prompt (producer) timed out after 600000ms");
+      },
+      sessionStoreOverrides: {
+        unregister: (sid: unknown) => {
+          unregisterCalls.push(String(sid));
+        },
+      },
+      guardStoreOverrides: {
+        clear: (sid: unknown) => {
+          clearCalls.push(String(sid));
+        },
+      },
+    });
+    await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    // The finally block must have run for the timed-out producer session.
+    expect(unregisterCalls).toContain("sess_to_cleanup");
+    expect(clearCalls).toContain("sess_to_cleanup");
+  });
+});

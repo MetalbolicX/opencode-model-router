@@ -164,7 +164,13 @@ export const handleToolExecuteAfter = async (
   // Option (i): verify-dispatch around the built-in `task` tool (advisory-grade —
   // we observe the finished task result and append a forcing note if it is not
   // accepted; we cannot retry a task call that already finished).
-  await verifyTaskAfterHook(ctx, input, output, sid);
+  //
+  // We intentionally do NOT forward `sid` (the subagent session id) to
+  // verifyTaskAfterHook. Passing it as parentSessionID caused grader session
+  // creation to hang because the SDK cannot create child sessions of subagent
+  // sessions (SDD change: fix-subagent-session-hang). The verifier creates
+  // grader sessions parentless instead.
+  await verifyTaskAfterHook(ctx, input, output);
 }
 
 // ---------------------------------------------------------------------------

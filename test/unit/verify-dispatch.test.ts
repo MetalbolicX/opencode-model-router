@@ -876,7 +876,7 @@ describe("dispatchGrader / buildGateDeps / verifyTaskAfterHook — parentSession
     expect(createCalls[0]).toEqual({});
   });
 
-  it("verifyTaskAfterHook forwards its parentSessionID to buildGateDeps (and onward to dispatchGrader)", async () => {
+  it("verifyTaskAfterHook does NOT forward parentSessionID — grader sessions are parentless", async () => {
     process.env.MODEL_ROUTER_ENFORCE = "1";
     // To force the checker/grader path (which calls dispatchGrader), the DoD
     // must have NO `check:` lines — a DoD with criteria only is normalized
@@ -903,13 +903,13 @@ describe("dispatchGrader / buildGateDeps / verifyTaskAfterHook — parentSession
       output: "<task_result>\nDONE.</task_result>",
       metadata: { sessionId: "child-prop" },
     };
-    await verifyTaskAfterHook(ctx, input, output, "orch-sid-abc");
+    await verifyTaskAfterHook(ctx, input, output);
     // The grader path runs (DoD has no deterministic checks) and dispatches a
-    // grader session — assert the parentID was propagated end-to-end.
-    const graderCreate = createCalls.find(
-      (c: any) => c?.body?.parentID === "orch-sid-abc",
-    );
-    expect(graderCreate).toBeDefined();
+    // grader session — assert the grader session is parentless end-to-end.
+    // (SDD change: fix-subagent-session-hang — passing the subagent SID as
+    // parentID caused the SDK to hang permanently.)
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0]).toEqual({});
   });
 
   it("dispatchGrader still creates a child session when the grader prompt fails", async () => {
@@ -931,5 +931,38 @@ describe("dispatchGrader / buildGateDeps / verifyTaskAfterHook — parentSession
 
     expect(createCalls).toHaveLength(1);
     expect(createCalls[0]).toEqual({ body: { parentID: "orch-sid-fail" } });
+  });
+
+  it("dispatchGrader rejects on timeout when session.create hangs", async () => {
+    // Simulate the withTimeout-rejected error shape (what session.create
+    // would throw after the 30s timeout). We avoid the actual 30s wait by
+    // throwing immediately with the same error message contract — the test
+    // verifies the dispatchGrader surface, not the timer itself.
+    const ctx = makeCtx({
+      directory: workDir,
+      createImpl: async () => {
+        throw new Error("grader session.create timed out after 30000ms");
+      },
+    });
+    await expect(
+      dispatchGrader(ctx, { tier: "fast", system: "", prompt: "verify" }),
+    ).rejects.toThrow("timed out after");
+  });
+
+  it("dispatchGrader cleans up graderSessions on timeout", async () => {
+    // Simulate the withTimeout-rejected error so we don't actually wait 30s.
+    const ctx = makeCtx({
+      directory: workDir,
+      createImpl: async () => {
+        throw new Error("grader session.create timed out after 30000ms");
+      },
+    });
+    try {
+      await dispatchGrader(ctx, { tier: "fast", system: "", prompt: "verify" });
+    } catch {
+      // expected — timeout rejects
+    }
+    // graderSessions must be empty — no leaked tracking entries on hang
+    expect(ctx.graderSessions.size).toBe(0);
   });
 });
