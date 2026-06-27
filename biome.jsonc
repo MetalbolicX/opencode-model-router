@@ -6,7 +6,16 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["src/**", "test/**", "scripts/**", "*.ts", "*.js", "*.json", "*.jsonc"]
+    "includes": [
+      "src/**",
+      "test/**",
+      "scripts/**",
+      "*.ts",
+      "*.js",
+      "*.json",
+      "*.jsonc",
+      "!scripts/QUICK_REFERENCE.ts"
+    ]
   },
   "formatter": {
     "enabled": true,

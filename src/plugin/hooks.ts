@@ -268,7 +268,12 @@ export const handleSystemTransform = async (
   let enfOn = false;
   try {
     enfOn = resolveEnforcementMode({ config: cfg, env: process.env }).mode !== "off";
-  } catch {}
+  } catch (err) {
+    console.warn(
+      "[opencode-model-router] failed to resolve enforcement mode, defaulting to off:",
+      err,
+    );
+  }
   (output.system as string[]).push(assembleSystemPrompt(cfg, orchestratorModel, enfOn));
 };
 
