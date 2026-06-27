@@ -66,3 +66,12 @@ export const VERIFY_REQUIRE_MODES: readonly VerifyRequireMode[] = [
   "whenDoDPresent",
   "always",
 ];
+
+/**
+ * Allowed values for `enforcement.verify.graderPolicy`. Centralized so the
+ * config-shape validator and the runtime type union cannot drift.
+ */
+export type GraderPolicy = "atLeastProducerTier";
+
+/** Allowed values for `enforcement.verify.graderPolicy`. */
+export const GRADER_POLICIES: readonly GraderPolicy[] = ["atLeastProducerTier"];
