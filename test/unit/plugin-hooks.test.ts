@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,33 @@ import {
   handleToolExecuteAfter,
   handleToolExecuteBefore,
 } from "../../src/plugin/hooks";
+
+// ---------------------------------------------------------------------------
+// Module spy for `verifyTaskAfterHook`.
+//
+// `handleToolExecuteAfter` calls `verifyTaskAfterHook(ctx, input, output)`.
+// For the hook-contract regression in this file we need to observe the call
+// (signature, arity, pass-through of `input` / `output.metadata`) without
+// driving the real verify path. We mock the export of `src/verify/dispatch`
+// so that the import in `src/plugin/hooks.ts` resolves to the spy.
+//
+// The spy is a no-op by default. Existing tests in this file exercise paths
+// that either bypass the verify-after-task branch (tool !== "task", undefined
+// input, bypass mode) or do not depend on the real implementation, so
+// replacing the export with a vi.fn() does not regress them.
+// ---------------------------------------------------------------------------
+
+const verifyTaskAfterHookMock = vi.fn((..._args: unknown[]): Promise<void> => Promise.resolve());
+vi.mock("../../src/verify/dispatch", async () => {
+  const actual = await vi.importActual<typeof import("../../src/verify/dispatch")>(
+    "../../src/verify/dispatch",
+  );
+  return {
+    ...actual,
+    verifyTaskAfterHook: (...args: unknown[]) =>
+      (verifyTaskAfterHookMock as unknown as (...a: unknown[]) => Promise<void>)(...args),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Hook adapter contract tests.
@@ -458,6 +485,53 @@ describe("handleToolExecuteAfter — verifyTaskAfterHook contract", () => {
     await handleToolExecuteAfter(h.ctx, input, output);
     expect(h.recordToolEventCalls).toHaveLength(1);
     expect(h.recordToolEventCalls[0]!.sid).toBe("sid-A1");
+  });
+
+  // PR2 / Unit 2 — hook-contract regression for parent-metadata forwarding.
+  //
+  // `handleToolExecuteAfter` must invoke `verifyTaskAfterHook(ctx, input, output)`
+  // — exactly 3 arguments, no extra parent. The `output.metadata` object must
+  // be passed through unchanged so `parseTaskResult` inside the hook sees the
+  // raw `parentSessionId` field. Forwarding `input.sessionID` as a parent
+  // argument here would recreate the subagent-session-hang bug
+  // (SDD change: fix-subagent-session-hang).
+  it("calls verifyTaskAfterHook(ctx, input, output) — raw output.metadata through, no extra parent argument", async () => {
+    verifyTaskAfterHookMock.mockClear();
+
+    const h = makeHarness();
+    const metadata = {
+      sessionId: "child-sid",
+      parentSessionId: "orch-sid-meta",
+    };
+    const input = {
+      // A "subagent SID" — must NEVER be forwarded as the grader parent.
+      sessionID: "sid-subagent-NEVER-FORWARD",
+      tool: "task",
+      args: {
+        subagent_type: "fast",
+        prompt: "[acceptance]\ncriteria: result is reasonable\n[/acceptance]",
+      },
+    };
+    const output = {
+      output: "<task_result>\nDONE.</task_result>",
+      metadata,
+    };
+
+    await handleToolExecuteAfter(h.ctx, input, output);
+
+    // verifyTaskAfterHook was called exactly once.
+    expect(verifyTaskAfterHookMock).toHaveBeenCalledTimes(1);
+    const call = verifyTaskAfterHookMock.mock.calls[0]!;
+    // Exactly 3 arguments: (ctx, input, output) — NO extra parent argument.
+    expect(call).toHaveLength(3);
+    expect(call[0]).toBe(h.ctx);
+    expect(call[1]).toBe(input);
+    expect(call[2]).toBe(output);
+    // output.metadata is the raw object passed in — the parentSessionId path
+    // is intact (parseTaskResult reads from this exact reference).
+    expect((call[2] as { metadata: unknown }).metadata).toBe(metadata);
+    // input.sessionID is not forwarded as a 4th positional parent arg.
+    expect(call[3]).toBeUndefined();
   });
 });
 

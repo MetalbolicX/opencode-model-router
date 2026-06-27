@@ -876,11 +876,13 @@ describe("dispatchGrader / buildGateDeps / verifyTaskAfterHook — parentSession
     expect(createCalls[0]).toEqual({});
   });
 
-  it("verifyTaskAfterHook does NOT forward parentSessionID — grader sessions are parentless", async () => {
+  it("verifyTaskAfterHook forwards parentSessionID from output.metadata to the grader session (orchestrator-parented grader)", async () => {
+    // PR2 / Unit 2 — flipped from the pre-PR1 "parentless" assertion. The
+    // contract is now metadata-first: when output.metadata.parentSessionId
+    // is present, the grader session is created as a child of that
+    // orchestrator/root session, NOT as a new root.
+    // (SDD change: fix-task-verifier-session-parenting.)
     process.env.MODEL_ROUTER_ENFORCE = "1";
-    // To force the checker/grader path (which calls dispatchGrader), the DoD
-    // must have NO `check:` lines — a DoD with criteria only is normalized
-    // to kind "checker" by the gate, which then calls dispatchGrader.
     const createCalls: unknown[] = [];
     const ctx = makeCtx({
       directory: workDir,
@@ -892,7 +894,7 @@ describe("dispatchGrader / buildGateDeps / verifyTaskAfterHook — parentSession
     });
     const input = {
       tool: "task",
-      sessionID: "orch",
+      sessionID: "subagent-sid-ignored",
       args: {
         subagent_type: "fast",
         prompt:
@@ -901,15 +903,97 @@ describe("dispatchGrader / buildGateDeps / verifyTaskAfterHook — parentSession
     };
     const output = {
       output: "<task_result>\nDONE.</task_result>",
-      metadata: { sessionId: "child-prop" },
+      metadata: {
+        sessionId: "child-prop",
+        parentSessionId: "orch-sid-parent",
+      },
     };
     await verifyTaskAfterHook(ctx, input, output);
-    // The grader path runs (DoD has no deterministic checks) and dispatches a
-    // grader session — assert the grader session is parentless end-to-end.
-    // (SDD change: fix-subagent-session-hang — passing the subagent SID as
-    // parentID caused the SDK to hang permanently.)
+    // DoD has no deterministic checks -> gate runs the checker path ->
+    // dispatchGrader is called once with parentID taken from metadata.
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0]).toEqual({ body: { parentID: "orch-sid-parent" } });
+  });
+
+  it("verifyTaskAfterHook leaves grader sessions parentless when metadata has no parentSessionId (fallback)", async () => {
+    // PR2 / Unit 2 — kept from the pre-PR1 contract: when the metadata
+    // does NOT include parentSessionId (absent, non-object, missing field,
+    // or non-string), grader creation stays parentless. The hook MUST NOT
+    // throw, and MUST NOT silently substitute input.sessionID.
+    // (SDD change: fix-task-verifier-session-parenting — fallback path.)
+    process.env.MODEL_ROUTER_ENFORCE = "1";
+    const createCalls: unknown[] = [];
+    const ctx = makeCtx({
+      directory: workDir,
+      cfg: { enforcement: { verify: { require: "always" } } } as any,
+      createImpl: async (req: unknown) => {
+        createCalls.push(req);
+        return { data: { id: "grader-sid" } };
+      },
+    });
+    const input = {
+      tool: "task",
+      sessionID: "subagent-sid",
+      args: {
+        subagent_type: "fast",
+        prompt:
+          "[acceptance]\ncriteria: result is reasonable\ndeliverable: a report\n[/acceptance]",
+      },
+    };
+    // No parentSessionId in metadata — fallback path: parentless grader.
+    const output = {
+      output: "<task_result>\nDONE.</task_result>",
+      metadata: { sessionId: "child-fallback" },
+    };
+    await verifyTaskAfterHook(ctx, input, output);
+    // dispatchGrader is called with {} (no parentID) when metadata is absent.
     expect(createCalls).toHaveLength(1);
     expect(createCalls[0]).toEqual({});
+  });
+
+  it("verifyTaskAfterHook never uses input.sessionID as the grader parentID (regression)", async () => {
+    // PR2 / Unit 2 — regression for the subagent-session-hang vector.
+    // Even when input.sessionID is a plausible value (a real-looking
+    // session id), the verify-after-task hook MUST derive the grader
+    // parent from output.metadata.parentSessionId only. Forwarding the
+    // subagent SID caused the SDK to attempt creating a child of a
+    // subagent session, which hangs the opencode runtime permanently
+    // (SDD change: fix-subagent-session-hang).
+    process.env.MODEL_ROUTER_ENFORCE = "1";
+    const createCalls: unknown[] = [];
+    const ctx = makeCtx({
+      directory: workDir,
+      cfg: { enforcement: { verify: { require: "always" } } } as any,
+      createImpl: async (req: unknown) => {
+        createCalls.push(req);
+        return { data: { id: "grader-sid" } };
+      },
+    });
+    const input = {
+      tool: "task",
+      // Deliberately a "subagent SID" — must NEVER be forwarded as parentID.
+      sessionID: "subagent-sid-NEVER-FORWARD",
+      args: {
+        subagent_type: "fast",
+        prompt:
+          "[acceptance]\ncriteria: result is reasonable\ndeliverable: a report\n[/acceptance]",
+      },
+    };
+    const output = {
+      output: "<task_result>\nDONE.</task_result>",
+      metadata: {
+        sessionId: "child-sid",
+        parentSessionId: "real-orch-parent",
+      },
+    };
+    await verifyTaskAfterHook(ctx, input, output);
+    // Parent must come from metadata, NOT from input.sessionID.
+    expect(createCalls).toHaveLength(1);
+    expect(createCalls[0]).toEqual({ body: { parentID: "real-orch-parent" } });
+    // Belt-and-braces: explicit non-equality with the subagent SID path.
+    expect(createCalls[0]).not.toEqual({
+      body: { parentID: "subagent-sid-NEVER-FORWARD" },
+    });
   });
 
   it("dispatchGrader still creates a child session when the grader prompt fails", async () => {
