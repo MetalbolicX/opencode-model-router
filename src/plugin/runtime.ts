@@ -22,6 +22,7 @@ import { type Hooks, type ToolContext, tool } from "@opencode-ai/plugin";
 
 import { handleCommandBefore } from "../router/commands";
 import type { Preset } from "../router/config";
+import { log, logEvent } from "../utils/observability";
 import type { PluginContext } from "./context";
 import { executeDelegate } from "./delegate";
 import {
@@ -142,5 +143,31 @@ export const assembleRuntimeHooks = (
         { command: input.command, arguments: input.arguments ?? "" },
         output,
       ),
+
+    // PR5: graceful shutdown hook. opencode's plugin SDK exposes a
+    // `Hooks.dispose` callback that fires when the plugin is unloaded
+    // (graceful shutdown, hot-reload, or opencode exit). We delegate to
+    // `ctx.dispose()` which is idempotent and never throws; any errors
+    // are surfaced as a structured error-level lifecycle event so
+    // operators can see the unload path without parsing the trajectory
+    // dir.
+    async dispose(): Promise<void> {
+      const startedAt = Date.now();
+      logEvent.lifecycle.shutdown({ phase: "starting" });
+      try {
+        await ctx.dispose();
+        logEvent.lifecycle.shutdown({ phase: "complete", durationMs: Date.now() - startedAt });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        // Error-level: surface the unload failure so it lands on stderr
+        // and is grep-able separately from successful shutdowns.
+        log.error({
+          event: "lifecycle.shutdown",
+          phase: "error",
+          error: reason,
+          durationMs: Date.now() - startedAt,
+        });
+      }
+    },
   };
 };

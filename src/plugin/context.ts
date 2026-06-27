@@ -42,7 +42,7 @@ import { createChangedFileStore } from "../verify/dispatch";
 import type { ExecSeam, FsSeam, MutexRegistry } from "../verify/types";
 
 /**
- * Mutable per-plugin state that isn't a store (today: only the bypass flag).
+ * Mutable per-plugin runtime state that isn't a store (today: only the bypass flag).
  * Exposed as a single object so that hook adapters can mutate fields without
  * the context object itself having to be replaced.
  */
@@ -50,6 +50,15 @@ export interface PluginState {
   /** When true, the router skips all system-prompt injection, subagent tracking,
    *  cap enforcement, and narration detection for the current plugin lifetime. */
   bypassed: boolean;
+  /** PR5: track any active timers/intervals so `dispose()` can clear them.
+   *  Currently empty (no intervals), but the field exists so adding a
+   *  background driver later requires no context-shape change. */
+  cleanupTasks: Array<() => void>;
+  /** PR5: monotonically-incrementing counter flipped the first time
+   *  `dispose()` runs. Subsequent calls are no-ops so a double-shutdown
+   *  (opencode sometimes calls dispose twice on hot-reload) cannot
+   *  flush a half-cleaned context. */
+  shutdownStarted: boolean;
 }
 
 /** The per-plugin seam bundle. */
@@ -80,6 +89,15 @@ export interface PluginContext {
    *  value on read failure. Replaces the 7+ duplicated try/refresh/catch
    *  blocks that used to live in `commands.ts` and `hooks.ts`. */
   getFreshConfig(): Promise<RouterConfig>;
+
+  /** PR5: graceful shutdown. Idempotent — second call is a no-op. Runs
+   *  every registered cleanup task in reverse registration order, clears
+   *  the timer registry, invalidates the config cache, and flips
+   *  `state.shutdownStarted` so any in-flight hook that observes it can
+   *  short-circuit. Never throws — a shutdown must not turn into a
+   *  crash. The dispose hook in `src/plugin/runtime.ts` is the single
+   *  production caller; tests call `dispose()` directly. */
+  dispose(): Promise<void>;
 
   /** Mutable per-plugin runtime state (bypass flag). */
   state: PluginState;
@@ -148,8 +166,38 @@ export const createPluginContext = async (plugin: PluginInput): Promise<PluginCo
         return await this.getConfig();
       }
     },
+    async dispose(this: PluginContext): Promise<void> {
+      // Idempotent: a second dispose() call is a no-op. This matters
+      // because opencode's plugin lifecycle can call dispose() twice on
+      // hot-reload, and a half-cleaned context must not be re-flushed.
+      if (this.state.shutdownStarted) return;
+      this.state.shutdownStarted = true;
+      // Run cleanup tasks in reverse registration order so the last
+      // registered task runs first (LIFO matches typical "release"
+      // semantics — most recently acquired resource released first).
+      // Each task is wrapped in try/catch so one failing cleanup cannot
+      // block the others.
+      for (const task of this.state.cleanupTasks.slice().reverse()) {
+        try {
+          task();
+        } catch {
+          // best-effort: a shutdown must never throw
+        }
+      }
+      this.state.cleanupTasks.length = 0;
+      // Invalidate the config cache so any late read after dispose
+      // surfaces as a fresh load (the cache cannot outlive the plugin
+      // instance — see src/index.ts).
+      try {
+        configStore.invalidate();
+      } catch {
+        // best-effort
+      }
+    },
     state: {
       bypassed: false,
+      cleanupTasks: [],
+      shutdownStarted: false,
     },
     sessionStore: createSessionStore(),
     trajectoryStore: createTrajectoryStore(),

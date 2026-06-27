@@ -27,6 +27,7 @@ import type { RouterConfig } from "../router/config";
 import { resolveEnforcementMode } from "../router/enforcement";
 import { getActiveTiers } from "../router/protocol";
 import { WRITE_TOOLS } from "../router/tools";
+import { logEvent } from "../utils/observability";
 import { withTimeout } from "../utils/timeout";
 import type { DoD, InferHints } from "./dod";
 import { inferDoD, parseDoDFromDispatch } from "./dod";
@@ -329,6 +330,28 @@ export const verifyTaskAfterHook = async (
       artefact,
       await buildGateDeps(ctx, parentSessionID),
     );
+    // PR5: structured verification outcome observability. Three events:
+    //   - verification.pass   — gate accepted the artefact
+    //   - verification.fail   — gate rejected (and produced a forcing note)
+    //   - verification.skipped — verification was bypassed (never / trivial)
+    // Operators get an at-a-glance count of gate decisions without
+    // correlating trajectory files.
+    const eventPayload = {
+      sid: childSessionID ?? "",
+      parentSid: parentSessionID ?? "",
+      producerTier,
+      method: res.verdict.method,
+      dodSource: res.dodSource,
+      skipped: res.verdict.skipped === true,
+      reasonCount: res.verdict.reasons.length,
+    };
+    if (res.accepted) {
+      logEvent.verification.pass(eventPayload);
+    } else if (res.verdict.skipped) {
+      logEvent.verification.skipped({ ...eventPayload, reasons: res.verdict.reasons });
+    } else {
+      logEvent.verification.fail({ ...eventPayload, reasons: res.verdict.reasons });
+    }
     if (!res.accepted && !res.verdict.skipped) {
       const ladder = activeCfg.enforcement?.escalate?.ladder ?? ["fast", "medium", "heavy"];
       const li = ladder.indexOf(producerTier);
@@ -338,7 +361,20 @@ export const verifyTaskAfterHook = async (
       output["output"] = typeof existing === "string" ? existing + "\n\n" + note : note;
     }
     if (childSessionID) ctx.changedFileStore.clear(childSessionID);
-  } catch {
-    // fail-closed: a verification error must NEVER throw out of the after-hook
+  } catch (err) {
+    // fail-closed: a verification error must NEVER throw out of the after-hook.
+    // PR5: surface the fail-loud as a structured verification.fail event so
+    // operators can see when the gate itself crashed (vs. when it returned a
+    // verdict.reasons rejection).
+    logEvent.verification.fail({
+      sid: "",
+      producerTier: "",
+      method: "none",
+      dodSource: "explicit",
+      skipped: false,
+      reasonCount: 1,
+      reasons: [err instanceof Error ? err.message : String(err)],
+      crashed: true,
+    });
   }
 };

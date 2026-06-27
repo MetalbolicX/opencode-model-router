@@ -16,6 +16,8 @@ import {
   advance,
   buildEscalatePolicy,
   dumpDelegateScorecard,
+  logDelegation,
+  logEscalation,
   newLadderState,
   nextAction,
   recordAttempt,
@@ -23,6 +25,7 @@ import {
 import { scrubText } from "../guard/scrub";
 import type { Preset } from "../router/config";
 import { getActiveTiers } from "../router/protocol";
+import { logEvent } from "../utils/observability";
 import { withTimeout } from "../utils/timeout";
 import {
   buildAcceptedSuffix,
@@ -100,16 +103,25 @@ export const executeDelegate = async (
 
     let producerText = "";
     let forcing: string | null = null;
+    let attemptCounter = 0;
 
     while (true) {
       // Abort check (1): top of loop. If we were cancelled while idle
       // (between attempts, before the loop, or after the last cleanup),
       // exit silently with no producer session to clean up.
       if (signal?.aborted) {
+        logEvent.routing.aborted({
+          phase: "loop-top",
+          attempts: state.totalAttempts,
+        });
         return "";
       }
 
       if (safety++ > safetyMax) {
+        logEvent.routing.unmet({
+          reason: "safety-net",
+          attempts: state.totalAttempts,
+        });
         return (
           `[router status: unmet] delegation stopped by the safety net after ` +
           `${state.totalAttempts} attempt(s).\n\n${scrubText(producerText)}`
@@ -117,6 +129,11 @@ export const executeDelegate = async (
       }
       const tier = state.currentTier;
       const taskText = forcing ? `${scrubText(forcing)}\n\n${args.task}` : args.task;
+      // PR5: structured routing.delegated event — operators can now see
+      // the tier + attempt index for every delegation step without
+      // scraping the trajectory file.
+      attemptCounter += 1;
+      logDelegation("", tier, attemptCounter, forcing != null);
 
       let created: SessionCreateResult;
       try {
@@ -238,6 +255,23 @@ export const executeDelegate = async (
             dodSource: dod.source,
           };
         }
+        // PR5: structured verification outcome observability. Mirrors the
+        // dispatch.ts wiring so the two wirings emit the same event shape.
+        const eventPayload = {
+          sid: producerSid,
+          producerTier: tier,
+          method: gateRes.verdict.method,
+          dodSource: gateRes.dodSource,
+          skipped: gateRes.verdict.skipped === true,
+          reasonCount: gateRes.verdict.reasons.length,
+        };
+        if (gateRes.accepted) {
+          logEvent.verification.pass(eventPayload);
+        } else if (gateRes.verdict.skipped) {
+          logEvent.verification.skipped({ ...eventPayload, reasons: gateRes.verdict.reasons });
+        } else {
+          logEvent.verification.fail({ ...eventPayload, reasons: gateRes.verdict.reasons });
+        }
 
         const costRatio =
           typeof tiersForCost?.[tier]?.costRatio === "number" ? tiersForCost[tier].costRatio : 1;
@@ -261,6 +295,10 @@ export const executeDelegate = async (
           // Return silently — no unmet message, no scorecard dump, no
           // forcing note surfaced to the caller.
           if (action.reason === "aborted") {
+            logEvent.routing.aborted({
+              phase: "ladder-give-up",
+              attempts: state.totalAttempts,
+            });
             return "";
           }
           dumpDelegateScorecard(producerSid, state, false, gateRes.verdict.method);
@@ -274,7 +312,20 @@ export const executeDelegate = async (
         }
         // retry or escalate
         forcing = action.forcingMessage ?? null;
+        const prevTier = state.currentTier;
         state = advance(state, action);
+        // PR5: structured routing.escalated event — fires on the
+        // from→to transition only (retry stays in the same tier, so no
+        // event). `attempt` is the escalation index from the ladder.
+        if (action.action === "escalate" && action.tier && action.tier !== prevTier) {
+          logEscalation(
+            producerSid,
+            prevTier,
+            action.tier,
+            "verification-fail",
+            state.totalAttempts,
+          );
+        }
       } finally {
         // Per-attempt cleanup (drop producer session tracking + state).
         // Always runs — even on timeout, abort, or throw from

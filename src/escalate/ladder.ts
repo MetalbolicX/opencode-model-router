@@ -1,5 +1,6 @@
 import type { RouterConfig } from "../router/config";
 import { writeTrajectoryLog } from "../utils/log";
+import { logEvent } from "../utils/observability";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -204,4 +205,52 @@ export const dumpDelegateScorecard = (
 ): void => {
   const line = formatLadderScorecard(state, accepted, method);
   writeTrajectoryLog(sid, line, "delegate");
+  // PR5: structured outcome observability. The temp-file scorecard stays
+  // as a forensic record; this line gives operators an at-a-glance
+  // grep-able event without having to tail the trajectory dir.
+  const payload = {
+    sid,
+    finalTier: state.currentTier,
+    totalAttempts: state.totalAttempts,
+    escalations: state.escalations,
+    cost: state.cumulativeCost,
+    verdict: accepted ? "PASS" : "UNMET",
+    method,
+  };
+  if (accepted) {
+    logEvent.routing.accepted(payload);
+  } else {
+    logEvent.routing.unmet(payload);
+  }
+};
+
+/**
+ * Emit a structured routing.escalated event when the ladder promotes a
+ * producer to a higher tier. Called from `executeDelegate` immediately
+ * after `advance()` runs the escalation transition. The from/to pair
+ * lets operators reconstruct the ladder path per session without
+ * correlating per-attempt logs.
+ */
+export const logEscalation = (
+  sid: string,
+  from: string,
+  to: string,
+  reason: string,
+  attempts: number,
+): void => {
+  logEvent.routing.escalated({ sid, from, to, reason, attempts });
+};
+
+/**
+ * Emit a structured routing.delegated event when a delegation attempt
+ * begins. The `tier` is the producer tier for the attempt; the `attempt`
+ * index is 1-based so logs line up with the ladder's `attemptsThisTier`.
+ */
+export const logDelegation = (
+  sid: string,
+  tier: string,
+  attempt: number,
+  isRetry: boolean,
+): void => {
+  logEvent.routing.delegated({ sid, tier, attempt, isRetry });
 };
