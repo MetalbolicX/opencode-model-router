@@ -22,6 +22,7 @@
 
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { log } from "../utils/observability";
 import type { RouterState } from "./config.types";
 import { RouterStateError } from "./config-errors";
 import { readMergedConfig } from "./config-loader";
@@ -92,15 +93,11 @@ export const readState = async (): Promise<RouterState> => {
   }
 
   if (legacyRaw === null) {
-    // eslint-disable-next-line no-console
-    console.warn(`router state: no file at ${preferred}; starting with empty state`);
+    log.debug({ event: "config.state_missing", path: preferred });
     return {};
   }
 
-  // eslint-disable-next-line no-console
-  console.warn(
-    `router state: legacy file found at ${legacy}; reading it and migrating on next write`,
-  );
+  log.info({ event: "config.state_migration", from: legacy, to: preferred });
   return parseStateFile(legacy, legacyRaw);
 };
 

@@ -244,10 +244,10 @@ export const logEvent = {
   // lifecycle
   lifecycle: {
     shutdown(payload: Omit<LogPayload, "event">): void {
-      log.info({ event: "lifecycle.shutdown", ...payload });
+      log.debug({ event: "lifecycle.shutdown", ...payload });
     },
     startup(payload: Omit<LogPayload, "event">): void {
-      log.info({ event: "lifecycle.startup", ...payload });
+      log.debug({ event: "lifecycle.startup", ...payload });
     },
   },
 } as const;

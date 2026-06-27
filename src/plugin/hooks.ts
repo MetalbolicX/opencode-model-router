@@ -25,6 +25,7 @@ import { resolveEnforcementMode } from "../router/enforcement";
 import { assembleSystemPrompt, getActiveTiers } from "../router/protocol";
 import { READ_ONLY_TOOLS } from "../router/sessions";
 import { writeTrajectoryLog } from "../utils/log";
+import { log } from "../utils/observability";
 import { verifyTaskAfterHook } from "../verify/dispatch";
 import type { PluginContext } from "./context";
 import type { HookEventPayload, HookPayload } from "./types";
@@ -269,10 +270,7 @@ export const handleSystemTransform = async (
   try {
     enfOn = resolveEnforcementMode({ config: cfg, env: process.env }).mode !== "off";
   } catch (err) {
-    console.warn(
-      "[opencode-model-router] failed to resolve enforcement mode, defaulting to off:",
-      err,
-    );
+    log.warn({ event: "enforcement.resolve_failed", error: String(err) });
   }
   (output.system as string[]).push(assembleSystemPrompt(cfg, orchestratorModel, enfOn));
 };

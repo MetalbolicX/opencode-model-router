@@ -23,6 +23,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { log } from "../utils/observability";
 import type { ConfigLayer, RouterConfig, RouterState } from "./config.types";
 import { isPlainObject } from "./config.types";
 import { RouterConfigError } from "./config-errors";
@@ -185,8 +186,7 @@ export const readConfigLayer = async (
  * the format matches the golden-error-message suite (`test/golden/`).
  */
 const warnAndSkip = (layer: ConfigLayer, _kind: "missing"): void => {
-  // eslint-disable-next-line no-console
-  console.warn(`config: optional ${layer.kind} layer not found at ${layer.path}; using defaults`);
+  log.debug({ event: "config.layer_missing", kind: layer.kind, path: layer.path });
 };
 
 // ---------------------------------------------------------------------------
