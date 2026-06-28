@@ -311,6 +311,82 @@ describe("observability — convenience helpers (logEvent)", () => {
     expect(warnLines).toContain("verification.fail");
   });
 
+  it("routing.nonretryable emits at warn level with the documented payload fields", () => {
+    // routing.nonretryable is the CAUSE event for non-retryable prompt
+    // failures and the pre-prompt tierModel guard failure. Fires at warn
+    // level so operators can grep for policy stops at the default info
+    // log level without opt-in.
+    delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    logEvent.routing.nonretryable({
+      reason: "model not found",
+      tier: "fast",
+      attempt: 1,
+    });
+    // Default level is "info" — warn events fire, log (info+debug) does NOT.
+    expect(filterLoggerLines(logSpy.mock.calls)).toHaveLength(0);
+    const warnLines = filterLoggerLines(warnSpy.mock.calls);
+    expect(warnLines).toHaveLength(1);
+    const env = extractEnvelope(warnLines[0]!);
+    expect(env["event"]).toBe("routing.nonretryable");
+    expect(env["level"]).toBe("warn");
+    expect(env["reason"]).toBe("model not found");
+    expect(env["tier"]).toBe("fast");
+    expect(env["attempt"]).toBe(1);
+  });
+
+  it("routing.retryable emits at debug level (silenced at default info level)", () => {
+    // routing.retryable is the CAUSE event for retryable prompt failures
+    // (HTTP 429, transient transport). Fires at debug level because it is
+    // noisy under default info level — opt-in via MODEL_ROUTER_LOG_LEVEL=debug.
+    delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    logEvent.routing.retryable({
+      reason: "rate limited",
+      tier: "fast",
+      attempt: 1,
+    });
+    // Default level is "info" — debug events must NOT fire.
+    expect(filterLoggerLines(logSpy.mock.calls)).toHaveLength(0);
+
+    // Opt-in to debug — now it should fire.
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    __resetLoggerForTest();
+    logEvent.routing.retryable({
+      reason: "rate limited",
+      tier: "fast",
+      attempt: 1,
+    });
+    const lines = filterLoggerLines(logSpy.mock.calls);
+    expect(lines).toHaveLength(1);
+    const env = extractEnvelope(lines[0]!);
+    expect(env["event"]).toBe("routing.retryable");
+    expect(env["level"]).toBe("debug");
+    expect(env["reason"]).toBe("rate limited");
+    expect(env["tier"]).toBe("fast");
+    expect(env["attempt"]).toBe(1);
+  });
+
+  it("routing.nonretryable + routing.retryable appear in the documented event vocabulary", () => {
+    // Pin the event names + level routing as part of the public contract:
+    // adding these to the `emits the documented event names` assertion
+    // catches any future rename silently that would break operator dashboards.
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    logEvent.routing.nonretryable({ reason: "x", tier: "fast", attempt: 1 });
+    logEvent.routing.retryable({ reason: "y", tier: "fast", attempt: 1 });
+
+    const warnEvents = filterLoggerLines(warnSpy.mock.calls).map((l) => extractEnvelope(l).event);
+    const logEvents = filterLoggerLines(logSpy.mock.calls).map((l) => extractEnvelope(l).event);
+    expect(warnEvents).toContain("routing.nonretryable");
+    expect(logEvents).toContain("routing.retryable");
+  });
+
   it("verification.skipped is debug-level (silenced at default info level)", () => {
     delete process.env["MODEL_ROUTER_LOG_LEVEL"];
     __resetLoggerForTest();

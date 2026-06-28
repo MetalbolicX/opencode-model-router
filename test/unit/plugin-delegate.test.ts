@@ -1677,6 +1677,234 @@ describe("executeDelegate — abort on the fail-fast path is silent (SDD regress
 });
 
 // ---------------------------------------------------------------------------
+// SDD: fail-fast-hardening-v2 (Phase 3) — observability wiring tests.
+//
+// Phase 3 attaches structured events to the previously-dark paths:
+//   - `routing.nonretryable` (warn) fires on every policy-stop path:
+//     pre-prompt guard failure + non-retryable prompt classification.
+//   - `routing.retryable` (debug, opt-in via MODEL_ROUTER_LOG_LEVEL=debug)
+//     fires on retryable prompt failures (HTTP 429, transient transport).
+//   - `config.stale_serve` (warn) fires when `refreshConfig()` throws and
+//     the cached snapshot from `getConfig()` is used as fallback.
+//
+// The tests below assert the canonical event names, levels, and payload
+// shape — the contract operators grep for in dashboards. They are pinned
+// to console spies (not to logEvent.X spies) because the public seam is
+// the formatted JSON envelope, not the in-process helper call.
+// ---------------------------------------------------------------------------
+
+describe("executeDelegate — observability wiring (Phase 3 SDD)", () => {
+  /** Parse model-router JSON envelopes out of a console.* spy. */
+  const captureModelRouterEnvelopes = (
+    spy: ReturnType<typeof vi.spyOn>,
+  ): Array<Record<string, unknown>> => {
+    return (spy.mock.calls as unknown as unknown[][])
+      .map((c: unknown[]) => String(c[0] ?? ""))
+      .filter((l: string) => l.startsWith("[model-router] "))
+      .map((l: string) => JSON.parse(l.slice(l.indexOf("{"))));
+  };
+
+  it("emits routing.nonretryable with the classified reason on a non-retryable prompt error", async () => {
+    acceptMock.mockReset();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { ctx } = makeCtx({
+        promptImpl: async () => {
+          throw new Error("quota exceeded: insufficient credits");
+        },
+      });
+      await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+      const envs = captureModelRouterEnvelopes(warnSpy);
+      const nonretryable = envs.find((e) => e["event"] === "routing.nonretryable");
+      expect(nonretryable).toBeDefined();
+      expect(nonretryable?.["reason"]).toMatch(/billing|quota|credit/i);
+      expect(nonretryable?.["tier"]).toBe("fast");
+      expect(nonretryable?.["attempt"]).toBe(1);
+      // routing.nonretryable precedes routing.unmet (cause then terminal).
+      const unmet = envs.find((e) => e["event"] === "routing.unmet");
+      expect(unmet).toBeDefined();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("emits routing.nonretryable on the pre-prompt tierModel() guard failure", async () => {
+    acceptMock.mockReset();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const malformedCfg = {
+        activePreset: "default",
+        defaultTier: "fast",
+        presets: {
+          default: {
+            fast: {
+              model: "" as unknown as string,
+              description: "fast",
+              whenToUse: [],
+              costRatio: 1,
+            },
+          },
+        },
+        rules: [],
+        enforcement: {
+          verify: { require: "always", graderTemperature: 0 },
+          escalate: { ladder: ["fast"], maxAttemptsPerTier: 1, maxTotalAttempts: 1 },
+        },
+      } as RouterConfig;
+      const { ctx } = makeCtx({
+        getConfigImpl: () => malformedCfg,
+        refreshConfigImpl: () => malformedCfg,
+      });
+      await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+      const envs = captureModelRouterEnvelopes(warnSpy);
+      const nonretryable = envs.find((e) => e["event"] === "routing.nonretryable");
+      expect(nonretryable).toBeDefined();
+      expect(nonretryable?.["reason"]).toBe("invalid model or provider configuration");
+      expect(nonretryable?.["tier"]).toBe("fast");
+      expect(nonretryable?.["attempt"]).toBe(1);
+      // routing.unmet follows nonretryable on this path too.
+      const unmet = envs.find((e) => e["event"] === "routing.unmet");
+      expect(unmet).toBeDefined();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("emits routing.retryable with the classified reason on a retryable prompt error", async () => {
+    acceptMock.mockResolvedValueOnce({
+      accepted: true,
+      verdict: { pass: true, method: "deterministic", reasons: [] },
+      dodSource: "inferred",
+    });
+    // routing.retryable fires at debug level — opt in to capture it.
+    const origLevel = process.env["MODEL_ROUTER_LOG_LEVEL"];
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    const { __resetLoggerForTest } = await import("../../src/utils/observability");
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { ctx } = makeCtx({
+        promptImpl: async () => {
+          // "transport boom" matches no non-retryable pattern → retryable.
+          throw new Error("transport boom");
+        },
+      });
+      await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+      const envs = captureModelRouterEnvelopes(logSpy);
+      const retryable = envs.find((e) => e["event"] === "routing.retryable");
+      expect(retryable).toBeDefined();
+      expect(retryable?.["reason"]).toMatch(/transport|transient/i);
+      expect(retryable?.["tier"]).toBe("fast");
+      expect(retryable?.["attempt"]).toBe(1);
+    } finally {
+      logSpy.mockRestore();
+      if (origLevel === undefined) delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+      else process.env["MODEL_ROUTER_LOG_LEVEL"] = origLevel;
+      __resetLoggerForTest();
+    }
+  });
+
+  it("emits config.stale_serve when refreshConfig() throws and getConfig() succeeds", async () => {
+    acceptMock.mockResolvedValueOnce({
+      accepted: true,
+      verdict: { pass: true, method: "deterministic", reasons: [] },
+      dodSource: "inferred",
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { ctx } = makeCtx({
+        refreshConfigImpl: () => {
+          throw new Error("disk read failed");
+        },
+      });
+      await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+      const envs = captureModelRouterEnvelopes(warnSpy);
+      const staleServe = envs.find((e) => e["event"] === "config.stale_serve");
+      expect(staleServe).toBeDefined();
+      expect(String(staleServe?.["reason"])).toContain("disk read failed");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("emits routing.retryable with reason 'rate limited' on HTTP 429", async () => {
+    acceptMock.mockResolvedValueOnce({
+      accepted: true,
+      verdict: { pass: true, method: "deterministic", reasons: [] },
+      dodSource: "inferred",
+    });
+    const origLevel = process.env["MODEL_ROUTER_LOG_LEVEL"];
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    const { __resetLoggerForTest } = await import("../../src/utils/observability");
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { ctx } = makeCtx({
+        promptImpl: async () => {
+          // HTTP 429 → classifier returns retryable / "rate limited"
+          // (verified directly by classifyPromptError in
+          // test/unit/error-classify.test.ts; here we exercise the
+          // end-to-end wiring through executeDelegate).
+          const err = new Error("rate limit hit") as Error & { status?: number };
+          err.status = 429;
+          throw err;
+        },
+      });
+      await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+      const envs = captureModelRouterEnvelopes(logSpy);
+      const retryable = envs.find((e) => e["event"] === "routing.retryable");
+      expect(retryable).toBeDefined();
+      expect(retryable?.["reason"]).toBe("rate limited");
+      expect(retryable?.["tier"]).toBe("fast");
+    } finally {
+      logSpy.mockRestore();
+      if (origLevel === undefined) delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+      else process.env["MODEL_ROUTER_LOG_LEVEL"] = origLevel;
+      __resetLoggerForTest();
+    }
+  });
+
+  it("cross-runtime abort (duck-type) returns '' silently and emits NO routing.nonretryable", async () => {
+    acceptMock.mockReset(); // gate MUST NOT be called on the abort path
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ac = new AbortController();
+    try {
+      const { ctx } = makeCtx({
+        createImpl: async () => ({ data: { id: "sess_duck_abort" } }),
+        // Throw a plain Error with `name: "AbortError"` — NOT a DOMException.
+        // The duck-type match in `isAbortLikeError` recognises this shape
+        // (cross-runtime abort detection). Confirms the abort path is
+        // silent: no nonretryable telemetry, no unmet.
+        promptImpl: async () => {
+          queueMicrotask(() => ac.abort());
+          const err = new Error("aborted") as Error & { name?: string };
+          err.name = "AbortError";
+          throw err;
+        },
+      });
+      const out = await executeDelegate(
+        ctx,
+        { task: "say hi", tier: "fast" },
+        undefined,
+        ac.signal,
+      );
+      expect(out).toBe("");
+      const envs = captureModelRouterEnvelopes(warnSpy);
+      // No routing.nonretryable on the abort path.
+      const nonretryable = envs.find((e) => e["event"] === "routing.nonretryable");
+      expect(nonretryable).toBeUndefined();
+      // No routing.unmet either — abort is fully silent at the warn level.
+      const unmet = envs.find((e) => e["event"] === "routing.unmet");
+      expect(unmet).toBeUndefined();
+      // Gate was never called (same invariant as the DOMException path).
+      expect(acceptMock).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // SDD: fail-fast-hardening-v2 (Phase 2) — explicit guard wiring test.
 //
 // The delegate's pre-prompt tier-resolution check moved from an inline

@@ -228,6 +228,21 @@ export const logEvent = {
     aborted(payload: Omit<LogPayload, "event">): void {
       log.warn({ event: "routing.aborted", ...payload });
     },
+    // Non-retryable prompt failure (e.g. billing / model-not-found / auth).
+    // `nonretryable` is the CAUSE event (what stopped us from retrying);
+    // `unmet` is the TERMINAL outcome event (the delegation has stopped).
+    // Fires at warn level so operators can grep for policy stops without
+    // the noise of every retryable transport blip.
+    nonretryable(payload: Omit<LogPayload, "event">): void {
+      log.warn({ event: "routing.nonretryable", ...payload });
+    },
+    // Retryable prompt failure (e.g. HTTP 429 rate limit, transient
+    // transport error). Fires at debug level because retryable events
+    // are noisy under default info level — opt in via
+    // MODEL_ROUTER_LOG_LEVEL=debug when diagnosing ladder behaviour.
+    retryable(payload: Omit<LogPayload, "event">): void {
+      log.debug({ event: "routing.retryable", ...payload });
+    },
   },
   // verification layer
   verification: {

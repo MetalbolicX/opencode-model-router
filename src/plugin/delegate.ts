@@ -81,7 +81,13 @@ export const executeDelegate = async (
     let activeCfg = await ctx.getConfig();
     try {
       activeCfg = await ctx.refreshConfig();
-    } catch {
+    } catch (err) {
+      // Stale-config fallback: `refreshConfig()` failed (config store
+      // unreachable, parse error, etc.) but we still have a cached snapshot
+      // from `ctx.getConfig()`. Emit `config.stale_serve` so operators can
+      // correlate the cached serve with the refresh failure (without
+      // this event, a stale-served run looks identical to a clean run).
+      logEvent.config.staleServe({ reason: String(err) });
       activeCfg = await ctx.getConfig();
     }
     const initialTier =
@@ -203,6 +209,17 @@ export const executeDelegate = async (
         // message stay in sync across delegate + dispatch wirings.
         const guard = resolveTierModelGuard(activeCfg, tier);
         if (!guard.ok) {
+          // SDD: emit `routing.nonretryable` as the cause event alongside
+          // the terminal `routing.unmet` outcome so operators can tell
+          // policy-stop (this) from ladder-exhaustion (`routing.unmet`
+          // fired by `give_up` after all retries). The reason flows
+          // through the guard so both events name the same canonical
+          // invalid-config string.
+          logEvent.routing.nonretryable({
+            reason: guard.reason,
+            tier,
+            attempt: attemptCounter,
+          });
           logEvent.routing.unmet({
             reason: guard.reason,
             attempts: attemptCounter,
@@ -259,6 +276,15 @@ export const executeDelegate = async (
             return "";
           }
           if (classified.kind === "non_retryable") {
+            // SDD: emit `routing.nonretryable` as the cause event alongside
+            // the terminal `routing.unmet` outcome so operators can tell
+            // policy-stop (this) from ladder-exhaustion (`routing.unmet`
+            // fired by `give_up` after all retries).
+            logEvent.routing.nonretryable({
+              reason: classified.reason,
+              tier,
+              attempt: attemptCounter,
+            });
             logEvent.routing.unmet({
               reason: classified.reason,
               attempts: attemptCounter,
@@ -269,6 +295,17 @@ export const executeDelegate = async (
               `(after ${attemptCounter} attempt(s) on tier ${tier}).`
             );
           }
+          // Retryable (e.g. HTTP 429 rate limit, transient transport).
+          // Emit `routing.retryable` at debug level so operators can
+          // opt-in diagnose the retry/escalate flow. Reuse the existing
+          // `classified` variable — DO NOT call `classifyPromptError`
+          // twice. After emission, the existing ladder flow continues:
+          // empty artefact → gate → ladder.
+          logEvent.routing.retryable({
+            reason: classified.reason,
+            tier,
+            attempt: attemptCounter,
+          });
           // Provider-failover design (see header comment): a transport/API
           // error yields an empty artefact and counts as exactly ONE failed
           // attempt. `err` is bound so the failure is observable at debug
