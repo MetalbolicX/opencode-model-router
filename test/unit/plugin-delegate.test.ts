@@ -101,10 +101,15 @@ const makeCtx = (opts: {
   ctx: PluginContext;
   sessions: SessionCall[];
   counters: { getConfig: number; refreshConfig: number };
+  toastSpy: ReturnType<typeof vi.fn>;
 } => {
   const sessions: SessionCall[] = [];
   let createSeq = 0;
   const counters = { getConfig: 0, refreshConfig: 0 };
+  // SDD: tui-toast-verification — capture every showToast call so
+  // terminal-failure tests can assert that exactly one toast fires per
+  // terminal outcome and zero toasts fire on retry/abort paths.
+  const toastSpy = vi.fn().mockResolvedValue(undefined);
 
   const baseConfig: RouterConfig = {
     activePreset: "default",
@@ -164,6 +169,10 @@ const makeCtx = (opts: {
                 return { data: { parts: [{ type: "text", text: "I did it." }] } };
               },
         },
+        // SDD: tui-toast-verification — wire a tui.showToast spy so the
+        // terminal-failure tests can assert exactly-one-toast-per-outcome
+        // and zero-toasts-on-retry/abort invariants.
+        tui: { showToast: toastSpy },
       },
     } as any,
     initialConfig: baseConfig,
@@ -227,7 +236,7 @@ const makeCtx = (opts: {
     seams: { exec: {} as any, fs: {} as any },
   };
 
-  return { ctx, sessions, counters };
+  return { ctx, sessions, counters, toastSpy };
 };
 
 // ---------------------------------------------------------------------------
@@ -1388,30 +1397,42 @@ describe("executeDelegate — non-retryable prompt errors fail fast (SDD)", () =
 
   it("emits a routing.unmet observability event on the non-retryable fail-fast path", async () => {
     acceptMock.mockReset();
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { ctx } = makeCtx({
-      promptImpl: async () => {
-        throw new Error("quota exceeded: insufficient credits");
-      },
-    });
-    await executeDelegate(ctx, { task: "say hi", tier: "fast" });
-    // routing.unmet is emitted at warn level; filter to model-router lines
-    // and look for the documented event name + reason.
-    const lines = warnSpy.mock.calls
-      .map((c) => String(c[0] ?? ""))
-      .filter((l) => l.startsWith("[model-router] "));
-    const hasUnmet = lines.some((l) => {
-      try {
-        const env = JSON.parse(l.slice(l.indexOf("{")));
-        return (
-          env["event"] === "routing.unmet" && /billing|quota|credit/i.test(String(env["reason"]))
-        );
-      } catch {
-        return false;
-      }
-    });
-    expect(hasUnmet).toBe(true);
-    warnSpy.mockRestore();
+    // SDD: tui-toast-verification — routing.unmet is now a debug event.
+    // Opt in to debug level via MODEL_ROUTER_LOG_LEVEL and spy on
+    // console.log (debug+info share the stdout sink).
+    const origLevel = process.env["MODEL_ROUTER_LOG_LEVEL"];
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    const { __resetLoggerForTest } = await import("../../src/utils/observability");
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { ctx } = makeCtx({
+        promptImpl: async () => {
+          throw new Error("quota exceeded: insufficient credits");
+        },
+      });
+      await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+      // routing.unmet now flows through console.log at debug level.
+      const lines = logSpy.mock.calls
+        .map((c) => String(c[0] ?? ""))
+        .filter((l) => l.startsWith("[model-router] "));
+      const hasUnmet = lines.some((l) => {
+        try {
+          const env = JSON.parse(l.slice(l.indexOf("{")));
+          return (
+            env["event"] === "routing.unmet" && /billing|quota|credit/i.test(String(env["reason"]))
+          );
+        } catch {
+          return false;
+        }
+      });
+      expect(hasUnmet).toBe(true);
+    } finally {
+      logSpy.mockRestore();
+      if (origLevel === undefined) delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+      else process.env["MODEL_ROUTER_LOG_LEVEL"] = origLevel;
+      __resetLoggerForTest();
+    }
   });
 
   it("per-attempt cleanup still runs on the non-retryable fail-fast path", async () => {
@@ -1547,51 +1568,63 @@ describe("executeDelegate — tierModel() === null fails fast (SDD)", () => {
 
   it("emits a routing.unmet observability event on the tierModel-null path", async () => {
     acceptMock.mockReset();
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const malformedCfg = {
-      activePreset: "default",
-      defaultTier: "fast",
-      presets: {
-        default: {
-          fast: {
-            model: "" as unknown as string,
-            description: "fast",
-            whenToUse: [],
-            costRatio: 1,
+    // SDD: tui-toast-verification — routing.unmet is now a debug event.
+    // Opt in to debug level and spy on console.log.
+    const origLevel = process.env["MODEL_ROUTER_LOG_LEVEL"];
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    const { __resetLoggerForTest } = await import("../../src/utils/observability");
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const malformedCfg = {
+        activePreset: "default",
+        defaultTier: "fast",
+        presets: {
+          default: {
+            fast: {
+              model: "" as unknown as string,
+              description: "fast",
+              whenToUse: [],
+              costRatio: 1,
+            },
           },
         },
-      },
-      rules: [],
-      enforcement: {
-        verify: { require: "always", graderTemperature: 0 },
-        escalate: {
-          ladder: ["fast", "medium", "heavy"],
-          maxAttemptsPerTier: 1,
-          maxTotalAttempts: 5,
+        rules: [],
+        enforcement: {
+          verify: { require: "always", graderTemperature: 0 },
+          escalate: {
+            ladder: ["fast", "medium", "heavy"],
+            maxAttemptsPerTier: 1,
+            maxTotalAttempts: 5,
+          },
         },
-      },
-    } as RouterConfig;
-    const { ctx } = makeCtx({
-      getConfigImpl: () => malformedCfg,
-      refreshConfigImpl: () => malformedCfg,
-    });
-    await executeDelegate(ctx, { task: "say hi", tier: "fast" });
-    const lines = warnSpy.mock.calls
-      .map((c) => String(c[0] ?? ""))
-      .filter((l) => l.startsWith("[model-router] "));
-    const hasUnmet = lines.some((l) => {
-      try {
-        const env = JSON.parse(l.slice(l.indexOf("{")));
-        return (
-          env["event"] === "routing.unmet" &&
-          /invalid model or provider configuration/i.test(String(env["reason"]))
-        );
-      } catch {
-        return false;
-      }
-    });
-    expect(hasUnmet).toBe(true);
-    warnSpy.mockRestore();
+      } as RouterConfig;
+      const { ctx } = makeCtx({
+        getConfigImpl: () => malformedCfg,
+        refreshConfigImpl: () => malformedCfg,
+      });
+      await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+      const lines = logSpy.mock.calls
+        .map((c) => String(c[0] ?? ""))
+        .filter((l) => l.startsWith("[model-router] "));
+      const hasUnmet = lines.some((l) => {
+        try {
+          const env = JSON.parse(l.slice(l.indexOf("{")));
+          return (
+            env["event"] === "routing.unmet" &&
+            /invalid model or provider configuration/i.test(String(env["reason"]))
+          );
+        } catch {
+          return false;
+        }
+      });
+      expect(hasUnmet).toBe(true);
+    } finally {
+      logSpy.mockRestore();
+      if (origLevel === undefined) delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+      else process.env["MODEL_ROUTER_LOG_LEVEL"] = origLevel;
+      __resetLoggerForTest();
+    }
   });
 });
 
@@ -1706,7 +1739,14 @@ describe("executeDelegate — observability wiring (Phase 3 SDD)", () => {
 
   it("emits routing.nonretryable with the classified reason on a non-retryable prompt error", async () => {
     acceptMock.mockReset();
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // SDD: tui-toast-verification — both routing.nonretryable and
+    // routing.unmet are now debug events. Opt in via MODEL_ROUTER_LOG_LEVEL
+    // and spy on console.log (the shared debug+info sink).
+    const origLevel = process.env["MODEL_ROUTER_LOG_LEVEL"];
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    const { __resetLoggerForTest } = await import("../../src/utils/observability");
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       const { ctx } = makeCtx({
         promptImpl: async () => {
@@ -1714,7 +1754,7 @@ describe("executeDelegate — observability wiring (Phase 3 SDD)", () => {
         },
       });
       await executeDelegate(ctx, { task: "say hi", tier: "fast" });
-      const envs = captureModelRouterEnvelopes(warnSpy);
+      const envs = captureModelRouterEnvelopes(logSpy);
       const nonretryable = envs.find((e) => e["event"] === "routing.nonretryable");
       expect(nonretryable).toBeDefined();
       expect(nonretryable?.["reason"]).toMatch(/billing|quota|credit/i);
@@ -1724,13 +1764,22 @@ describe("executeDelegate — observability wiring (Phase 3 SDD)", () => {
       const unmet = envs.find((e) => e["event"] === "routing.unmet");
       expect(unmet).toBeDefined();
     } finally {
-      warnSpy.mockRestore();
+      logSpy.mockRestore();
+      if (origLevel === undefined) delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+      else process.env["MODEL_ROUTER_LOG_LEVEL"] = origLevel;
+      __resetLoggerForTest();
     }
   });
 
   it("emits routing.nonretryable on the pre-prompt tierModel() guard failure", async () => {
     acceptMock.mockReset();
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // SDD: tui-toast-verification — see sibling test; both events now
+    // flow through console.log at debug level.
+    const origLevel = process.env["MODEL_ROUTER_LOG_LEVEL"];
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    const { __resetLoggerForTest } = await import("../../src/utils/observability");
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       const malformedCfg = {
         activePreset: "default",
@@ -1756,7 +1805,7 @@ describe("executeDelegate — observability wiring (Phase 3 SDD)", () => {
         refreshConfigImpl: () => malformedCfg,
       });
       await executeDelegate(ctx, { task: "say hi", tier: "fast" });
-      const envs = captureModelRouterEnvelopes(warnSpy);
+      const envs = captureModelRouterEnvelopes(logSpy);
       const nonretryable = envs.find((e) => e["event"] === "routing.nonretryable");
       expect(nonretryable).toBeDefined();
       expect(nonretryable?.["reason"]).toBe("invalid model or provider configuration");
@@ -1766,7 +1815,10 @@ describe("executeDelegate — observability wiring (Phase 3 SDD)", () => {
       const unmet = envs.find((e) => e["event"] === "routing.unmet");
       expect(unmet).toBeDefined();
     } finally {
-      warnSpy.mockRestore();
+      logSpy.mockRestore();
+      if (origLevel === undefined) delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+      else process.env["MODEL_ROUTER_LOG_LEVEL"] = origLevel;
+      __resetLoggerForTest();
     }
   });
 
@@ -1810,7 +1862,14 @@ describe("executeDelegate — observability wiring (Phase 3 SDD)", () => {
       verdict: { pass: true, method: "deterministic", reasons: [] },
       dodSource: "inferred",
     });
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // SDD: tui-toast-verification — config.stale_serve was downgraded from
+    // warn to debug. Opt in via MODEL_ROUTER_LOG_LEVEL and spy on
+    // console.log to capture it.
+    const origLevel = process.env["MODEL_ROUTER_LOG_LEVEL"];
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    const { __resetLoggerForTest } = await import("../../src/utils/observability");
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       const { ctx } = makeCtx({
         refreshConfigImpl: () => {
@@ -1818,12 +1877,15 @@ describe("executeDelegate — observability wiring (Phase 3 SDD)", () => {
         },
       });
       await executeDelegate(ctx, { task: "say hi", tier: "fast" });
-      const envs = captureModelRouterEnvelopes(warnSpy);
+      const envs = captureModelRouterEnvelopes(logSpy);
       const staleServe = envs.find((e) => e["event"] === "config.stale_serve");
       expect(staleServe).toBeDefined();
       expect(String(staleServe?.["reason"])).toContain("disk read failed");
     } finally {
-      warnSpy.mockRestore();
+      logSpy.mockRestore();
+      if (origLevel === undefined) delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+      else process.env["MODEL_ROUTER_LOG_LEVEL"] = origLevel;
+      __resetLoggerForTest();
     }
   });
 
@@ -1866,7 +1928,16 @@ describe("executeDelegate — observability wiring (Phase 3 SDD)", () => {
 
   it("cross-runtime abort (duck-type) returns '' silently and emits NO routing.nonretryable", async () => {
     acceptMock.mockReset(); // gate MUST NOT be called on the abort path
+    // SDD: tui-toast-verification — both routing.nonretryable and
+    // routing.unmet are now debug events. To prove the abort path is
+    // fully silent (no policy telemetry at ANY level), spy on BOTH
+    // sinks and assert neither contains either event.
+    const origLevel = process.env["MODEL_ROUTER_LOG_LEVEL"];
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    const { __resetLoggerForTest } = await import("../../src/utils/observability");
+    __resetLoggerForTest();
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const ac = new AbortController();
     try {
       const { ctx } = makeCtx({
@@ -1889,17 +1960,26 @@ describe("executeDelegate — observability wiring (Phase 3 SDD)", () => {
         ac.signal,
       );
       expect(out).toBe("");
-      const envs = captureModelRouterEnvelopes(warnSpy);
-      // No routing.nonretryable on the abort path.
-      const nonretryable = envs.find((e) => e["event"] === "routing.nonretryable");
+      // No routing.nonretryable on the abort path (warn sink).
+      const warnEnvs = captureModelRouterEnvelopes(warnSpy);
+      const nonretryable = warnEnvs.find((e) => e["event"] === "routing.nonretryable");
       expect(nonretryable).toBeUndefined();
-      // No routing.unmet either — abort is fully silent at the warn level.
-      const unmet = envs.find((e) => e["event"] === "routing.unmet");
-      expect(unmet).toBeUndefined();
+      // No routing.unmet on the abort path at ANY sink (debug sink too —
+      // SDD downgraded it from warn, so the warn-sink-only check would
+      // no longer be sufficient).
+      const logEnvs = captureModelRouterEnvelopes(logSpy);
+      const unmetWarn = warnEnvs.find((e) => e["event"] === "routing.unmet");
+      const unmetLog = logEnvs.find((e) => e["event"] === "routing.unmet");
+      expect(unmetWarn).toBeUndefined();
+      expect(unmetLog).toBeUndefined();
       // Gate was never called (same invariant as the DOMException path).
       expect(acceptMock).not.toHaveBeenCalled();
     } finally {
       warnSpy.mockRestore();
+      logSpy.mockRestore();
+      if (origLevel === undefined) delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+      else process.env["MODEL_ROUTER_LOG_LEVEL"] = origLevel;
+      __resetLoggerForTest();
     }
   });
 });
@@ -1929,7 +2009,14 @@ describe("executeDelegate — observability wiring (Phase 3 SDD)", () => {
 describe("executeDelegate — explicit resolveTierModelGuard wiring (Phase 2 SDD)", () => {
   it("the guard's reason string is the same string the delegate emits on the fail-closed path", async () => {
     acceptMock.mockReset();
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // SDD: tui-toast-verification — routing.unmet is now a debug event.
+    // Opt in via MODEL_ROUTER_LOG_LEVEL and spy on console.log to capture
+    // the envelope.
+    const origLevel = process.env["MODEL_ROUTER_LOG_LEVEL"];
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    const { __resetLoggerForTest } = await import("../../src/utils/observability");
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       // Drive the SAME config through the guard and through executeDelegate,
       // then assert the unmet payload uses the guard's reason verbatim.
@@ -1974,7 +2061,7 @@ describe("executeDelegate — explicit resolveTierModelGuard wiring (Phase 2 SDD
 
       // 3. The routing.unmet event's reason matches the guard's reason
       //    byte-for-byte (this is what operators grep for in dashboards).
-      const lines = warnSpy.mock.calls
+      const lines = logSpy.mock.calls
         .map((c) => String(c[0] ?? ""))
         .filter((l) => l.startsWith("[model-router] "));
       const matched = lines.some((l) => {
@@ -1987,7 +2074,248 @@ describe("executeDelegate — explicit resolveTierModelGuard wiring (Phase 2 SDD
       });
       expect(matched).toBe(true);
     } finally {
-      warnSpy.mockRestore();
+      logSpy.mockRestore();
+      if (origLevel === undefined) delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+      else process.env["MODEL_ROUTER_LOG_LEVEL"] = origLevel;
+      __resetLoggerForTest();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SDD: tui-toast-verification — toast helper wiring on the delegate.
+//
+// Spec contract (terminal-failure toasts):
+//   - "Delegation terminal failure" — the system MUST request a TUI toast
+//     when delegation ends in a give-up or non-retryable failure.
+//   - "Retry Paths Stay Quiet" — at most ONE toast per terminal outcome;
+//     retries must NOT spam toasts.
+//   - "Best-Effort Toast Delivery" — toast rejection must not change the
+//     primary delegation outcome.
+//
+// Invariants under test:
+//   - Pre-prompt tierModel guard fail-fast fires an error toast.
+//   - Non-retryable prompt classification fail-fast fires an error toast.
+//   - Non-aborted `give_up` terminal fires a warning toast.
+//   - Abort paths (top-of-loop, after-create, during-prompt, ladder
+//     post-abort give_up) fire ZERO toasts — they're silently silent.
+//   - Retry/escalate paths fire ZERO toasts — only the terminal outcome
+//     surfaces.
+// ---------------------------------------------------------------------------
+
+describe("executeDelegate — toast helper wiring (SDD tui-toast-verification)", () => {
+  it("fires an error toast on the pre-prompt tierModel guard fail-fast path", async () => {
+    acceptMock.mockReset();
+    const malformedCfg = {
+      activePreset: "default",
+      defaultTier: "fast",
+      presets: {
+        default: {
+          fast: {
+            model: "" as unknown as string,
+            description: "fast",
+            whenToUse: [],
+            costRatio: 1,
+          },
+        },
+      },
+      rules: [],
+      enforcement: {
+        verify: { require: "always", graderTemperature: 0 },
+        escalate: { ladder: ["fast"], maxAttemptsPerTier: 1, maxTotalAttempts: 1 },
+      },
+    } as RouterConfig;
+    const { ctx, toastSpy } = makeCtx({
+      getConfigImpl: () => malformedCfg,
+      refreshConfigImpl: () => malformedCfg,
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router status: unmet]");
+    expect(toastSpy).toHaveBeenCalledTimes(1);
+    const args = toastSpy.mock.calls[0]?.[0] as { body: { message: string; variant: string } };
+    expect(args?.body.variant).toBe("error");
+    expect(args?.body.message).toContain("Delegation failed");
+    expect(args?.body.message).toContain("invalid model or provider configuration");
+  });
+
+  it("fires an error toast on the non-retryable prompt classification fail-fast path", async () => {
+    acceptMock.mockReset();
+    const { ctx, toastSpy } = makeCtx({
+      promptImpl: async () => {
+        throw new Error("quota exceeded: insufficient credits");
+      },
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router status: unmet]");
+    expect(toastSpy).toHaveBeenCalledTimes(1);
+    const args = toastSpy.mock.calls[0]?.[0] as { body: { message: string; variant: string } };
+    expect(args?.body.variant).toBe("error");
+    expect(args?.body.message).toContain("Delegation failed");
+    expect(args?.body.message).toMatch(/billing|quota|credit/i);
+  });
+
+  it("fires a warning toast on the non-aborted give_up terminal path (ladder exhaustion)", async () => {
+    acceptMock.mockResolvedValue({
+      accepted: false,
+      verdict: { pass: false, method: "deterministic", reasons: ["file missing"] },
+      dodSource: "inferred",
+    });
+    const { ctx, toastSpy } = makeCtx({});
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router status: unmet]");
+    // Exactly ONE toast — the terminal ladder-exhaustion outcome.
+    expect(toastSpy).toHaveBeenCalledTimes(1);
+    const args = toastSpy.mock.calls[0]?.[0] as { body: { message: string; variant: string } };
+    expect(args?.body.variant).toBe("warning");
+    expect(args?.body.message).toContain("Delegation unmet");
+    expect(args?.body.message).toMatch(/attempt/);
+  });
+
+  it("fires ZERO toasts on a happy-path accepted delegation", async () => {
+    acceptMock.mockResolvedValueOnce({
+      accepted: true,
+      verdict: { pass: true, method: "deterministic", reasons: [] },
+      dodSource: "inferred",
+    });
+    const { ctx, toastSpy } = makeCtx({});
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router \u2713 accepted: deterministic]");
+    expect(toastSpy).not.toHaveBeenCalled();
+  });
+
+  it("fires ZERO toasts on a retry/escalate path (no terminal failure)", async () => {
+    // First attempt FAILS (with retry), second attempt PASSES — the
+    // toast is held back for the final outcome (which is accept).
+    acceptMock
+      .mockResolvedValueOnce({
+        accepted: false,
+        verdict: { pass: false, method: "deterministic", reasons: ["missing"] },
+        dodSource: "inferred",
+      })
+      .mockResolvedValueOnce({
+        accepted: true,
+        verdict: { pass: true, method: "deterministic", reasons: [] },
+        dodSource: "inferred",
+      });
+    const { ctx, toastSpy } = makeCtx({});
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router \u2713 accepted: deterministic]");
+    expect(toastSpy).not.toHaveBeenCalled();
+  });
+
+  it("fires ZERO toasts on any abort branch (all four abort checkpoints stay silent)", async () => {
+    acceptMock.mockResolvedValue({
+      accepted: false,
+      verdict: { pass: false, method: "deterministic", reasons: ["x"] },
+      dodSource: "inferred",
+    });
+
+    // (1) top-of-loop
+    {
+      const ac = new AbortController();
+      ac.abort();
+      const { ctx, toastSpy } = makeCtx({});
+      const out = await executeDelegate(
+        ctx,
+        { task: "say hi", tier: "fast" },
+        undefined,
+        ac.signal,
+      );
+      expect(out).toBe("");
+      expect(toastSpy).not.toHaveBeenCalled();
+    }
+
+    // (2) after-create
+    {
+      const ac = new AbortController();
+      let firstCreate = true;
+      const { ctx, toastSpy } = makeCtx({
+        createImpl: async () => {
+          if (firstCreate) {
+            firstCreate = false;
+            queueMicrotask(() => ac.abort());
+          }
+          return { data: { id: "sess_a" } };
+        },
+        promptImpl: async () => {
+          throw new Error("prompt must NOT be called");
+        },
+      });
+      const out = await executeDelegate(
+        ctx,
+        { task: "say hi", tier: "fast" },
+        undefined,
+        ac.signal,
+      );
+      expect(out).toBe("");
+      expect(toastSpy).not.toHaveBeenCalled();
+    }
+
+    // (3) during-prompt
+    {
+      const ac = new AbortController();
+      const { ctx, toastSpy } = makeCtx({
+        createImpl: async () => ({ data: { id: "sess_b" } }),
+        promptImpl: async () => {
+          queueMicrotask(() => ac.abort());
+          throw new DOMException("aborted", "AbortError");
+        },
+      });
+      const out = await executeDelegate(
+        ctx,
+        { task: "say hi", tier: "fast" },
+        undefined,
+        ac.signal,
+      );
+      expect(out).toBe("");
+      expect(toastSpy).not.toHaveBeenCalled();
+    }
+
+    // (4) ladder post-abort give_up
+    {
+      const ac = new AbortController();
+      let createCount = 0;
+      const { ctx, toastSpy } = makeCtx({
+        createImpl: async () => {
+          createCount++;
+          if (createCount === 2) ac.abort();
+          return { data: { id: `sess_${createCount}` } };
+        },
+        promptImpl: async () => ({
+          data: { parts: [{ type: "text", text: "x" }] },
+        }),
+      });
+      const out = await executeDelegate(
+        ctx,
+        { task: "say hi", tier: "fast" },
+        undefined,
+        ac.signal,
+      );
+      expect(out).toBe("");
+      expect(toastSpy).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does NOT change the primary outcome if the toast surface rejects (best-effort)", async () => {
+    // Replace the per-ctx toast spy with a rejecting one — the helper
+    // swallows the rejection internally, so the visible unmet string
+    // must still be produced and the loop must not throw.
+    acceptMock.mockReset();
+    const { ctx } = makeCtx({
+      promptImpl: async () => {
+        throw new Error("quota exceeded: insufficient credits");
+      },
+    });
+    // Swap the toast spy for a rejecting mock so the .catch(() => {})
+    // path is exercised.
+    const rejectingToast = vi.fn().mockRejectedValue(new Error("TUI offline"));
+    (ctx.plugin.client as unknown as { tui: { showToast: unknown } }).tui = {
+      showToast: rejectingToast,
+    };
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    // Primary outcome is unchanged — the unmet string is still produced.
+    expect(out).toContain("[router status: unmet]");
+    // Toast was attempted exactly once.
+    expect(rejectingToast).toHaveBeenCalledTimes(1);
   });
 });

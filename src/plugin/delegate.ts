@@ -29,6 +29,7 @@ import { classifyPromptError } from "../utils/error-classify";
 import { logEvent } from "../utils/observability";
 import { resolveTierModelGuard } from "../utils/tier-model-guard";
 import { withTimeout } from "../utils/timeout";
+import { showRouterToast } from "../utils/toast";
 import {
   buildAcceptedSuffix,
   buildDelegationDoD,
@@ -224,6 +225,14 @@ export const executeDelegate = async (
             reason: guard.reason,
             attempts: attemptCounter,
           });
+          // SDD: tui-toast-verification — surface the non-retryable policy
+          // stop as a TUI toast so the user sees a structured failure
+          // signal in addition to the structured log event. Best-effort:
+          // showRouterToast swallows any toast rejection internally.
+          showRouterToast(ctx.plugin.client, {
+            message: `Delegation failed: ${guard.reason}`,
+            variant: "error",
+          });
           return (
             `[router status: unmet] delegation stopped: ` +
             `${guard.reason} ` +
@@ -288,6 +297,13 @@ export const executeDelegate = async (
             logEvent.routing.unmet({
               reason: classified.reason,
               attempts: attemptCounter,
+            });
+            // SDD: tui-toast-verification — surface the non-retryable
+            // prompt-classification failure as a TUI toast. Best-effort;
+            // never throws on a missing TUI surface or rejected promise.
+            showRouterToast(ctx.plugin.client, {
+              message: `Delegation failed: ${classified.reason}`,
+              variant: "error",
             });
             return (
               `[router status: unmet] delegation stopped: ` +
@@ -389,6 +405,15 @@ export const executeDelegate = async (
           }
           dumpDelegateScorecard(producerSid, state, false, gateRes.verdict.method);
           const note = scrubText(buildForcingNote(gateRes.verdict.reasons));
+          // SDD: tui-toast-verification — emit exactly one toast on the
+          // non-aborted `give_up` terminal path so the user sees a
+          // structured summary. Aborts are intentionally silent; retries
+          // are silent. Only the final ladder-exhaustion toast fires.
+          // Best-effort: never throws on a missing TUI surface.
+          showRouterToast(ctx.plugin.client, {
+            message: `Delegation unmet after ${state.totalAttempts} attempt(s) across ${state.escalations} escalation(s)`,
+            variant: "warning",
+          });
           return (
             `[router status: unmet] The delegated result was not accepted after ` +
             `${state.totalAttempts} attempt(s) across ${state.escalations} escalation(s) ` +

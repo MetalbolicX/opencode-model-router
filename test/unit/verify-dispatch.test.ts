@@ -41,7 +41,8 @@ const makeCtx = (opts: {
   cfg?: Partial<RouterConfig>;
   changedFiles?: { path: string; status: string }[];
   sessionStore?: FakeStore;
-}): PluginContext => {
+  showToastImpl?: (req: any) => Promise<any>;
+}): PluginContext & { toastSpy?: ReturnType<typeof vi.fn> } => {
   const cfg: RouterConfig = {
     activePreset: "default",
     defaultTier: "fast",
@@ -77,6 +78,13 @@ const makeCtx = (opts: {
     ...(opts.sessionStore ?? {}),
   };
 
+  // SDD: tui-toast-verification — capture every showToast call so the
+  // verify-after-hook tests can assert that exactly one warning toast
+  // fires on a real verification rejection and zero toasts fire on
+  // acceptance / skipped / no-op paths.
+  const toastSpy = vi.fn().mockResolvedValue(undefined);
+  const showToastImpl = opts.showToastImpl ?? toastSpy;
+
   return {
     plugin: {
       directory: opts.directory,
@@ -85,8 +93,10 @@ const makeCtx = (opts: {
           create: opts.createImpl ?? (async () => ({ data: { id: "sess_x" } })),
           prompt: opts.promptImpl ?? (async () => ({ data: { parts: [] } })),
         },
+        tui: { showToast: showToastImpl },
       },
     } as any,
+    toastSpy,
     initialConfig: cfg,
     activeTiersAtLoad: { fast: cfg.presets.default.fast },
     getConfig: async () => cfg,
@@ -313,7 +323,13 @@ describe("dispatchGrader", () => {
   });
 
   it("emits a routing.unmet observability event with the offending tier on fail-closed", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // SDD: tui-toast-verification — routing.unmet was downgraded from
+    // warn to debug. Opt in to debug level and spy on console.log.
+    const origLevel = process.env["MODEL_ROUTER_LOG_LEVEL"];
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    const { __resetLoggerForTest } = await import("../../src/utils/observability");
+    __resetLoggerForTest();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       const ctx = makeCtx({ directory: workDir });
 
@@ -323,9 +339,9 @@ describe("dispatchGrader", () => {
         prompt: "verify",
       });
 
-      // routing.unmet is emitted at warn level; filter to model-router
+      // routing.unmet is emitted at debug level; filter to model-router
       // lines and look for the canonical event name + reason + tier.
-      const lines = warnSpy.mock.calls
+      const lines = logSpy.mock.calls
         .map((c) => String(c[0] ?? ""))
         .filter((l) => l.startsWith("[model-router] "));
       const matched = lines.some((l) => {
@@ -342,7 +358,10 @@ describe("dispatchGrader", () => {
       });
       expect(matched).toBe(true);
     } finally {
-      warnSpy.mockRestore();
+      logSpy.mockRestore();
+      if (origLevel === undefined) delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+      else process.env["MODEL_ROUTER_LOG_LEVEL"] = origLevel;
+      __resetLoggerForTest();
     }
   });
 });
@@ -538,6 +557,204 @@ describe("verifyTaskAfterHook", () => {
     await verifyTaskAfterHook(ctx, input, output);
 
     expect(output.output).toBe(original);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SDD: tui-toast-verification — toast helper wiring on the verify hook.
+//
+// Spec contract (verification terminal failure):
+//   - "Verification terminal failure" — the system MUST request a TUI
+//     toast when verification ends in a verification failure.
+//   - The toast MUST be emitted only once for that terminal outcome.
+//   - Best-effort: a rejecting toast MUST NOT change the primary outcome
+//     (the forcing-note append is still the detailed signal).
+//
+// Invariants under test:
+//   - On a real (non-skipped) verification rejection, exactly one
+//     warning toast fires with the canonical message.
+//   - On an accepted / skipped / no-op path, ZERO toasts fire.
+//   - On a verifier crash (fail-closed catch block), one error toast
+//     fires with a generic message and the hook does not throw.
+//   - The forcing-note behavior is preserved unchanged (toast is
+//     additive, not a replacement).
+// ---------------------------------------------------------------------------
+
+describe("verifyTaskAfterHook — toast helper wiring (SDD tui-toast-verification)", () => {
+  it("fires a warning toast on a real (non-skipped) verification rejection", async () => {
+    process.env.MODEL_ROUTER_ENFORCE = "1";
+    const ctx = makeCtx({ directory: workDir }) as ReturnType<typeof makeCtx> & {
+      toastSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const input = {
+      tool: "task",
+      sessionID: "orch",
+      args: {
+        subagent_type: "fast",
+        prompt:
+          "Create the report.\n[acceptance]\ncheck: fileExists path=missing.txt\n[/acceptance]",
+      },
+    };
+    const output = {
+      output: "<task_result>\nDONE: report created.\n</task_result>",
+      metadata: { sessionId: "child_toast_rej" },
+    };
+
+    await verifyTaskAfterHook(ctx, input, output);
+
+    // Forcing-note behavior is preserved.
+    expect(output.output).toContain("NOT ACCEPTED");
+    // Toast fires exactly once with the canonical warning shape.
+    expect(ctx.toastSpy).toHaveBeenCalledTimes(1);
+    const args = ctx.toastSpy.mock.calls[0]?.[0] as {
+      body: { message: string; variant: string };
+    };
+    expect(args?.body.variant).toBe("warning");
+    expect(args?.body.message).toContain("Delegation not accepted by verification");
+  });
+
+  it("does NOT fire a toast on an accepted verification", async () => {
+    process.env.MODEL_ROUTER_ENFORCE = "1";
+    // Target file exists -> deterministic check passes.
+    writeFileSync(join(workDir, "present_toast.txt"), "ok");
+    const ctx = makeCtx({ directory: workDir }) as ReturnType<typeof makeCtx> & {
+      toastSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const input = {
+      tool: "task",
+      sessionID: "orch",
+      args: {
+        subagent_type: "fast",
+        prompt:
+          "Create the file.\n[acceptance]\ncheck: fileExists path=present_toast.txt\n[/acceptance]",
+      },
+    };
+    const output = {
+      output: "<task_result>\nDONE.</task_result>",
+      metadata: { sessionId: "child_toast_ok" },
+    };
+
+    await verifyTaskAfterHook(ctx, input, output);
+
+    expect(ctx.toastSpy).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fire a toast when the gate is skipped", async () => {
+    process.env.MODEL_ROUTER_ENFORCE = "0";
+    const ctx = makeCtx({ directory: workDir }) as ReturnType<typeof makeCtx> & {
+      toastSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const input = {
+      tool: "task",
+      sessionID: "orch",
+      args: {
+        subagent_type: "fast",
+        prompt:
+          "Create the report.\n[acceptance]\ncheck: fileExists path=missing.txt\n[/acceptance]",
+      },
+    };
+    const output = {
+      output: "<task_result>\nDONE: report created.\n</task_result>",
+      metadata: { sessionId: "child_toast_skipped" },
+    };
+
+    await verifyTaskAfterHook(ctx, input, output);
+    expect(ctx.toastSpy).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fire a toast on non-task tool calls", async () => {
+    process.env.MODEL_ROUTER_ENFORCE = "1";
+    const ctx = makeCtx({ directory: workDir }) as ReturnType<typeof makeCtx> & {
+      toastSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const input = {
+      tool: "delegate",
+      sessionID: "orch",
+      args: {
+        prompt: "Create the file.\n[acceptance]\ncheck: fileExists path=missing.txt\n[/acceptance]",
+      },
+    };
+    const output = { output: "ok", metadata: {} };
+
+    await verifyTaskAfterHook(ctx, input, output);
+    expect(ctx.toastSpy).not.toHaveBeenCalled();
+  });
+
+  it("fires a generic error toast on a verifier crash (fail-closed catch)", async () => {
+    // Force the hook's outer catch to fire by making `isTrivial` throw
+    // inside the try block. The hook swallows the error, surfaces the
+    // verification.fail crash event, and fires the generic error toast.
+    // We avoid replacing `ctx.getConfig` because that happens BEFORE the
+    // try block in the hook — a rejection there escapes the catch.
+    process.env.MODEL_ROUTER_ENFORCE = "1";
+    const ctx = makeCtx({
+      directory: workDir,
+      sessionStore: {
+        isTrivial: () => {
+          throw new Error("isTrivial boom");
+        },
+      },
+    }) as ReturnType<typeof makeCtx> & {
+      toastSpy: ReturnType<typeof vi.fn>;
+    };
+
+    const input = {
+      tool: "task",
+      sessionID: "orch",
+      args: {
+        subagent_type: "fast",
+        prompt: "Do something.\n[acceptance]\ncheck: fileExists path=missing.txt\n[/acceptance]",
+      },
+    };
+    const output = {
+      output: "<task_result>\nDONE.</task_result>",
+      metadata: { sessionId: "child_crash" },
+    };
+
+    // The hook MUST NOT throw — fail-closed at the boundary.
+    await expect(verifyTaskAfterHook(ctx, input, output)).resolves.toBeUndefined();
+    // The generic error toast fires exactly once.
+    expect(ctx.toastSpy).toHaveBeenCalledTimes(1);
+    const args = ctx.toastSpy.mock.calls[0]?.[0] as {
+      body: { message: string; variant: string };
+    };
+    expect(args?.body.variant).toBe("error");
+    expect(args?.body.message).toContain("Verification failed");
+  });
+
+  it("does NOT change the primary outcome when the toast surface rejects (best-effort)", async () => {
+    process.env.MODEL_ROUTER_ENFORCE = "1";
+    // Swap the toast spy for a rejecting mock so the .catch(() => {})
+    // path is exercised.
+    const rejectingToast = vi.fn().mockRejectedValue(new Error("TUI offline"));
+    const ctx = makeCtx({
+      directory: workDir,
+      showToastImpl: rejectingToast,
+    });
+
+    const input = {
+      tool: "task",
+      sessionID: "orch",
+      args: {
+        subagent_type: "fast",
+        prompt:
+          "Create the report.\n[acceptance]\ncheck: fileExists path=missing.txt\n[/acceptance]",
+      },
+    };
+    const output = {
+      output: "<task_result>\nDONE: report created.\n</task_result>",
+      metadata: { sessionId: "child_reject" },
+    };
+
+    // The hook must still resolve (no throw) and still append the
+    // forcing note — toast failure MUST NOT affect the primary outcome.
+    await expect(verifyTaskAfterHook(ctx, input, output)).resolves.toBeUndefined();
+    expect(output.output).toContain("NOT ACCEPTED");
+    expect(rejectingToast).toHaveBeenCalledTimes(1);
   });
 });
 

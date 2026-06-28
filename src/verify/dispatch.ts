@@ -30,6 +30,7 @@ import { WRITE_TOOLS } from "../router/tools";
 import { logEvent } from "../utils/observability";
 import { resolveTierModelGuard } from "../utils/tier-model-guard";
 import { withTimeout } from "../utils/timeout";
+import { showRouterToast } from "../utils/toast";
 import type { DoD, InferHints } from "./dod";
 import { inferDoD, parseDoDFromDispatch } from "./dod";
 import type { GateDeps } from "./gate";
@@ -366,6 +367,16 @@ export const verifyTaskAfterHook = async (
       logEvent.verification.skipped({ ...eventPayload, reasons: res.verdict.reasons });
     } else {
       logEvent.verification.fail({ ...eventPayload, reasons: res.verdict.reasons });
+      // SDD: tui-toast-verification — surface the terminal gate rejection
+      // as a TUI toast. Fires only on a real (non-skipped) verification
+      // failure, exactly once per terminal outcome. Best-effort: never
+      // throws on a missing TUI surface or rejected promise. The forcing
+      // note below is the per-tool detailed signal; the toast is the
+      // at-a-glance summary.
+      showRouterToast(ctx.plugin.client, {
+        message: "Delegation not accepted by verification",
+        variant: "warning",
+      });
     }
     if (!res.accepted && !res.verdict.skipped) {
       const ladder = activeCfg.enforcement?.escalate?.ladder ?? ["fast", "medium", "heavy"];
@@ -390,6 +401,17 @@ export const verifyTaskAfterHook = async (
       reasonCount: 1,
       reasons: [err instanceof Error ? err.message : String(err)],
       crashed: true,
+    });
+    // SDD: tui-toast-verification — guarded toast on verifier crash.
+    // The catch block is fail-closed (must NEVER throw), so the toast
+    // call uses the same helper contract: missing TUI surface is a silent
+    // no-op and a rejected promise is swallowed internally. A generic
+    // message keeps the user signal stable across distinct crash shapes;
+    // the structured `verification.fail` event above carries the precise
+    // reason for operator diagnosis.
+    showRouterToast(ctx.plugin.client, {
+      message: "Verification failed unexpectedly",
+      variant: "error",
     });
   }
 };
