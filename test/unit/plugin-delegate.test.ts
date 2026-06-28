@@ -1304,3 +1304,373 @@ describe("executeDelegate — runtime forwards context.abort to executeDelegate"
     // proof for the call site.
   });
 });
+
+// ---------------------------------------------------------------------------
+// SDD: delegate-nonretryable-errors — fail-fast on non-retryable prompt
+// errors and on a `null` tierModel() result.
+//
+// The change wires `classifyPromptError` into the `session.prompt` catch and
+// adds a pre-prompt `tierModel()` guard. Non-retryable failures short-circuit
+// the loop with a fail-closed `[router status: unmet]` message naming the
+// classified reason, emit `routing.unmet` observability, and rely on the
+// per-attempt `finally` for cleanup. Retryable errors, aborts, and the
+// give_up/safety-net branches are unchanged.
+//
+// Invariants under test:
+//   - Non-retryable prompt errors (billing / model-not-found / auth) return
+//     a fail-closed `[router status: unmet]` message naming the reason.
+//   - The gate (`accept()`) is never called on the fail-fast path.
+//   - Only ONE producer session is created (no retry, no escalation).
+//   - `routing.unmet` is recorded for the failure.
+//   - `tierModel() === null` short-circuits BEFORE session.prompt fires.
+//   - The per-attempt `finally` still runs on the fail-fast path (cleanup
+//     spies fire).
+//   - Retryable prompt errors (e.g. "transport boom") keep the existing
+//     empty-artefact → gate → ladder behaviour.
+// ---------------------------------------------------------------------------
+
+describe("executeDelegate — non-retryable prompt errors fail fast (SDD)", () => {
+  it("fails fast on a non-retryable billing/subscription error and never runs the gate", async () => {
+    acceptMock.mockReset(); // gate MUST NOT be called on the fail-fast path
+    const createCalls: unknown[] = [];
+    const promptCalls: unknown[] = [];
+    const { ctx } = makeCtx({
+      createImpl: async (req: unknown) => {
+        createCalls.push(req);
+        return { data: { id: "sess_billing" } };
+      },
+      promptImpl: async () => {
+        promptCalls.push("called");
+        throw new Error("insufficient billing: please update your subscription");
+      },
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router status: unmet]");
+    expect(out).toContain("insufficient billing or subscription");
+    expect(out).not.toContain("[router \u2713 accepted:");
+    // Only one producer session — no retry, no escalation.
+    expect(createCalls).toHaveLength(1);
+    expect(promptCalls).toHaveLength(1);
+    // Gate was never called.
+    expect(acceptMock).not.toHaveBeenCalled();
+  });
+
+  it("fails fast on a non-retryable model-not-found error (HTTP 404)", async () => {
+    acceptMock.mockReset();
+    const { ctx } = makeCtx({
+      promptImpl: async () => {
+        const err = new Error("model not found: anthropic/gpt-9000") as Error & {
+          status?: number;
+        };
+        err.status = 404;
+        throw err;
+      },
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router status: unmet]");
+    expect(out).toContain("model not found");
+    expect(acceptMock).not.toHaveBeenCalled();
+  });
+
+  it("fails fast on a non-retryable auth/permission denied error", async () => {
+    acceptMock.mockReset();
+    const { ctx } = makeCtx({
+      promptImpl: async () => {
+        throw new Error("unauthorized: invalid API key");
+      },
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router status: unmet]");
+    expect(out).toContain("auth or permission denied");
+    expect(acceptMock).not.toHaveBeenCalled();
+  });
+
+  it("emits a routing.unmet observability event on the non-retryable fail-fast path", async () => {
+    acceptMock.mockReset();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { ctx } = makeCtx({
+      promptImpl: async () => {
+        throw new Error("quota exceeded: insufficient credits");
+      },
+    });
+    await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    // routing.unmet is emitted at warn level; filter to model-router lines
+    // and look for the documented event name + reason.
+    const lines = warnSpy.mock.calls
+      .map((c) => String(c[0] ?? ""))
+      .filter((l) => l.startsWith("[model-router] "));
+    const hasUnmet = lines.some((l) => {
+      try {
+        const env = JSON.parse(l.slice(l.indexOf("{")));
+        return (
+          env["event"] === "routing.unmet" && /billing|quota|credit/i.test(String(env["reason"]))
+        );
+      } catch {
+        return false;
+      }
+    });
+    expect(hasUnmet).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it("per-attempt cleanup still runs on the non-retryable fail-fast path", async () => {
+    acceptMock.mockReset();
+    const unregisterCalls: string[] = [];
+    const clearCalls: string[] = [];
+    const { ctx } = makeCtx({
+      createImpl: async () => ({ data: { id: "sess_failfast_cleanup" } }),
+      promptImpl: async () => {
+        throw new Error("forbidden: permission denied for model");
+      },
+      sessionStoreOverrides: {
+        unregister: (sid: unknown) => {
+          unregisterCalls.push(String(sid));
+        },
+      },
+      guardStoreOverrides: {
+        clear: (sid: unknown) => {
+          clearCalls.push(String(sid));
+        },
+      },
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router status: unmet]");
+    // The per-attempt `finally` MUST have run for the fail-fast producer
+    // session — a leak here would regress the abort/timeout cleanup tests.
+    expect(unregisterCalls).toContain("sess_failfast_cleanup");
+    expect(clearCalls).toContain("sess_failfast_cleanup");
+  });
+});
+
+describe("executeDelegate — tierModel() === null fails fast (SDD)", () => {
+  it("fails fast on a malformed tier model, never invoking session.prompt", async () => {
+    acceptMock.mockReset();
+    const promptCalls: unknown[] = [];
+    // Malformed `model` (empty string → no `provider/model` slash) makes
+    // tierModel() return null. The fail-fast must fire BEFORE the prompt
+    // call so the SDK never sees a malformed body.
+    const malformedCfg = {
+      activePreset: "default",
+      defaultTier: "fast",
+      presets: {
+        default: {
+          fast: {
+            model: "" as unknown as string,
+            description: "fast",
+            whenToUse: [],
+            costRatio: 1,
+          },
+          medium: {
+            model: "anthropic/claude-sonnet-4",
+            description: "medium",
+            whenToUse: [],
+            costRatio: 3,
+          },
+        },
+      },
+      rules: [],
+      enforcement: {
+        verify: { require: "always", graderTemperature: 0 },
+        escalate: {
+          ladder: ["fast", "medium", "heavy"],
+          maxAttemptsPerTier: 1,
+          maxTotalAttempts: 5,
+        },
+      },
+    } as RouterConfig;
+    const { ctx } = makeCtx({
+      getConfigImpl: () => malformedCfg,
+      refreshConfigImpl: () => malformedCfg,
+      promptImpl: async (req: unknown) => {
+        promptCalls.push(req);
+        return { data: { parts: [{ type: "text", text: "should not run" }] } };
+      },
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router status: unmet]");
+    expect(out).toContain("invalid model or provider configuration");
+    // session.prompt MUST NOT have been called.
+    expect(promptCalls).toHaveLength(0);
+    // The gate MUST NOT have been called either.
+    expect(acceptMock).not.toHaveBeenCalled();
+  });
+
+  it("fails fast when the tier itself is missing from the config", async () => {
+    acceptMock.mockReset();
+    const promptCalls: unknown[] = [];
+    // Tier 'fast' is omitted entirely from presets → tierModel() returns
+    // null because `tiers[tierName]` is undefined.
+    const noFastCfg = {
+      activePreset: "default",
+      defaultTier: "medium",
+      presets: {
+        default: {
+          medium: {
+            model: "anthropic/claude-sonnet-4",
+            description: "medium",
+            whenToUse: [],
+            costRatio: 3,
+          },
+          heavy: {
+            model: "anthropic/claude-opus-4",
+            description: "heavy",
+            whenToUse: [],
+            costRatio: 9,
+          },
+        },
+      },
+      rules: [],
+      enforcement: {
+        verify: { require: "always", graderTemperature: 0 },
+        escalate: {
+          ladder: ["fast", "medium", "heavy"],
+          maxAttemptsPerTier: 1,
+          maxTotalAttempts: 5,
+        },
+      },
+    } as RouterConfig;
+    const { ctx } = makeCtx({
+      getConfigImpl: () => noFastCfg,
+      refreshConfigImpl: () => noFastCfg,
+      promptImpl: async (req: unknown) => {
+        promptCalls.push(req);
+        return { data: { parts: [{ type: "text", text: "should not run" }] } };
+      },
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router status: unmet]");
+    expect(out).toContain("invalid model or provider configuration");
+    expect(promptCalls).toHaveLength(0);
+    expect(acceptMock).not.toHaveBeenCalled();
+  });
+
+  it("emits a routing.unmet observability event on the tierModel-null path", async () => {
+    acceptMock.mockReset();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const malformedCfg = {
+      activePreset: "default",
+      defaultTier: "fast",
+      presets: {
+        default: {
+          fast: {
+            model: "" as unknown as string,
+            description: "fast",
+            whenToUse: [],
+            costRatio: 1,
+          },
+        },
+      },
+      rules: [],
+      enforcement: {
+        verify: { require: "always", graderTemperature: 0 },
+        escalate: {
+          ladder: ["fast", "medium", "heavy"],
+          maxAttemptsPerTier: 1,
+          maxTotalAttempts: 5,
+        },
+      },
+    } as RouterConfig;
+    const { ctx } = makeCtx({
+      getConfigImpl: () => malformedCfg,
+      refreshConfigImpl: () => malformedCfg,
+    });
+    await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    const lines = warnSpy.mock.calls
+      .map((c) => String(c[0] ?? ""))
+      .filter((l) => l.startsWith("[model-router] "));
+    const hasUnmet = lines.some((l) => {
+      try {
+        const env = JSON.parse(l.slice(l.indexOf("{")));
+        return (
+          env["event"] === "routing.unmet" &&
+          /invalid model or provider configuration/i.test(String(env["reason"]))
+        );
+      } catch {
+        return false;
+      }
+    });
+    expect(hasUnmet).toBe(true);
+    warnSpy.mockRestore();
+  });
+});
+
+describe("executeDelegate — retryable prompt errors still use the ladder (SDD regression)", () => {
+  it("retryable transport error yields an empty artefact and lets the gate/ladder decide", async () => {
+    // A non-classified message ("transport boom") does NOT match any
+    // non-retryable pattern, so classifyPromptError returns
+    // kind: "retryable". The pre-refactor behaviour — empty artefact →
+    // gate → ladder — must be preserved byte-for-byte: the gate sees an
+    // empty producerText and decides to retry or give up based on its
+    // own verdict.
+    acceptMock.mockResolvedValue({
+      accepted: false,
+      verdict: { pass: false, method: "deterministic", reasons: ["empty"] },
+      dodSource: "inferred",
+    });
+    const { ctx } = makeCtx({
+      promptImpl: async () => {
+        throw new Error("transport boom");
+      },
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    // The gate ran, rejected the empty artefact, and the ladder eventually
+    // gave up with the standard `[router status: unmet]` message — NOT the
+    // fail-fast "delegation stopped:" prefix used by the non-retryable path.
+    expect(acceptMock).toHaveBeenCalled();
+    expect(out).toContain("[router status: unmet]");
+    expect(out).not.toContain("delegation stopped:");
+  });
+
+  it("a retryable error that the gate accepts still produces the accepted suffix", async () => {
+    // Back-compat: the existing 'treats prompt errors as an empty artefact
+    // and lets the gate decide' test is preserved — a retryable error that
+    // the gate happens to accept must still produce the accepted suffix.
+    acceptMock.mockResolvedValueOnce({
+      accepted: true,
+      verdict: { pass: true, method: "deterministic", reasons: [] },
+      dodSource: "inferred",
+    });
+    const { ctx } = makeCtx({
+      promptImpl: async () => {
+        throw new Error("transport boom");
+      },
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("[router \u2713 accepted: deterministic]");
+  });
+});
+
+describe("executeDelegate — abort on the fail-fast path is silent (SDD regression)", () => {
+  it("abort during prompt still returns '' and the per-attempt `finally` cleans up", async () => {
+    // The classifier's abort kind is the canonical AbortError check; this
+    // test pins the existing abort-during-prompt behaviour byte-for-byte
+    // (returns '' + cleanup spies fire) and protects the SDD change from
+    // accidentally re-routing AbortError through the non-retryable branch.
+    acceptMock.mockReset();
+    const ac = new AbortController();
+    const unregisterCalls: string[] = [];
+    const clearCalls: string[] = [];
+    const { ctx } = makeCtx({
+      createImpl: async () => ({ data: { id: "sess_abort_failfast" } }),
+      promptImpl: async () => {
+        queueMicrotask(() => ac.abort());
+        throw new DOMException("aborted", "AbortError");
+      },
+      sessionStoreOverrides: {
+        unregister: (sid: unknown) => {
+          unregisterCalls.push(String(sid));
+        },
+      },
+      guardStoreOverrides: {
+        clear: (sid: unknown) => {
+          clearCalls.push(String(sid));
+        },
+      },
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" }, undefined, ac.signal);
+    expect(out).toBe("");
+    // Cleanup must still have run on the abort branch.
+    expect(unregisterCalls).toContain("sess_abort_failfast");
+    expect(clearCalls).toContain("sess_abort_failfast");
+  });
+});

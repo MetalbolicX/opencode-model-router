@@ -25,6 +25,7 @@ import {
 import { scrubText } from "../guard/scrub";
 import type { Preset } from "../router/config";
 import { getActiveTiers } from "../router/protocol";
+import { classifyPromptError } from "../utils/error-classify";
 import { logEvent } from "../utils/observability";
 import { withTimeout } from "../utils/timeout";
 import {
@@ -188,7 +189,26 @@ export const executeDelegate = async (
       }
 
       try {
-        const model = tierModel(activeCfg, tier) ?? undefined;
+        // SDD change: delegate-nonretryable-errors. Resolve the tier's model
+        // up front. A `null` result means the tier is missing or the
+        // `provider/model` string is malformed — that's a non-retryable
+        // configuration failure. Skip session.prompt entirely and fail fast
+        // with a `[router status: unmet]` message rather than feeding an
+        // empty artefact to the gate and burning retry/escalation attempts
+        // on a configuration that will never succeed. The per-attempt
+        // `finally` still runs, so the producer session is untracked.
+        const model = tierModel(activeCfg, tier);
+        if (model === null) {
+          logEvent.routing.unmet({
+            reason: "invalid model or provider configuration",
+            attempts: attemptCounter,
+          });
+          return (
+            `[router status: unmet] delegation stopped: ` +
+            `invalid model or provider configuration ` +
+            `(after ${attemptCounter} attempt(s) on tier ${tier}).`
+          );
+        }
         producerText = "";
         // Provider-failover vs quality-escalation precedence (Phase 3.3):
         // Provider-failover is advisory only — a text chain injected into the orchestrator
@@ -214,11 +234,35 @@ export const executeDelegate = async (
           );
           producerText = extractPromptText(res);
         } catch (err) {
-          // AbortError (3): user cancelled while the prompt was in flight
-          // (or while the 600s timeout wrapper was racing). Bail out
-          // silently — the per-attempt `finally` will clean up.
-          if (err instanceof DOMException && err.name === "AbortError") {
+          // SDD change: delegate-nonretryable-errors. Classify the prompt
+          // error and dispatch on the bucket:
+          //   - abort         → silent `""` (preserves the existing
+          //                     AbortError short-circuit; the per-attempt
+          //                     `finally` cleans up the producer session).
+          //   - non_retryable → fail-closed `[router status: unmet]` with
+          //                     the classified reason. These errors (model
+          //                     not found, billing, auth/permission, invalid
+          //                     config) will never succeed on retry, so
+          //                     burning the ladder on them only inflates
+          //                     cost and pollutes verification telemetry.
+          //   - retryable     → empty artefact → gate → ladder (unchanged).
+          // The classifier's abort path is the canonical AbortError check,
+          // matching the previous `instanceof DOMException && name ===
+          // "AbortError"` test byte-for-byte.
+          const classified = classifyPromptError(err);
+          if (classified.kind === "abort") {
             return "";
+          }
+          if (classified.kind === "non_retryable") {
+            logEvent.routing.unmet({
+              reason: classified.reason,
+              attempts: attemptCounter,
+            });
+            return (
+              `[router status: unmet] delegation stopped: ` +
+              `${classified.reason} ` +
+              `(after ${attemptCounter} attempt(s) on tier ${tier}).`
+            );
           }
           // Provider-failover design (see header comment): a transport/API
           // error yields an empty artefact and counts as exactly ONE failed
