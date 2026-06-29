@@ -373,6 +373,19 @@ describe("executeDelegate — failure paths", () => {
     expect(out).toContain("could not create a producer session");
   });
 
+  it("early-returns without calling registerProducerSession when session.create yields empty-string id", async () => {
+    const registerSpy = vi.fn();
+    const { ctx } = makeCtx({
+      createImpl: async () => ({ data: { id: "" } }),
+      sessionStoreOverrides: {
+        registerProducerSession: registerSpy,
+      },
+    });
+    const out = await executeDelegate(ctx, { task: "say hi", tier: "fast" });
+    expect(out).toContain("could not create a producer session");
+    expect(registerSpy).not.toHaveBeenCalled();
+  });
+
   it("treats prompt errors as an empty artefact and lets the gate decide", async () => {
     acceptMock.mockResolvedValueOnce({
       accepted: true,

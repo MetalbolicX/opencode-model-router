@@ -26,7 +26,7 @@ import { scrubText } from "../guard/scrub";
 import type { Preset } from "../router/config";
 import { getActiveTiers } from "../router/protocol";
 import { classifyPromptError } from "../utils/error-classify";
-import { logEvent } from "../utils/observability";
+import { log, logEvent } from "../utils/observability";
 import { resolveTierModelGuard } from "../utils/tier-model-guard";
 import { withTimeout } from "../utils/timeout";
 import { showRouterToast } from "../utils/toast";
@@ -43,6 +43,40 @@ import { extractPromptText, extractSessionId } from "./types";
 
 /** Re-exported for IDE/test consumers — canonical shape lives in `./types`. */
 export type { DelegateArgs } from "./types";
+
+/**
+ * Clean up all per-producer-session state. Called from the `finally` block
+ * and from the early-return path when `session.create` succeeds but returns no
+ * usable SID (in which case we try a best-effort cleanup of any derivable ID
+ * from the raw response object).
+ *
+ * All three cleanup steps are wrapped in try/catch so a failing store never
+ * propagates — the contract is fail-soft. Failures are emitted as structured
+ * `log.warn` events so operators have visibility without crashing the session.
+ */
+const cleanupProducerSession = (ctx: PluginContext, producerSid: string): void => {
+  ctx.changedFileStore.clear(producerSid);
+  try {
+    ctx.sessionStore.unregister(producerSid);
+  } catch (err) {
+    log.warn({
+      event: "delegate.cleanup_failed",
+      store: "sessionStore.unregister",
+      sid: producerSid,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  try {
+    ctx.guardStore.clear(producerSid);
+  } catch (err) {
+    log.warn({
+      event: "delegate.cleanup_failed",
+      store: "guardStore.clear",
+      sid: producerSid,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+};
 
 /**
  * Delegate a task to a tier subagent. The subagent's result is independently
@@ -158,41 +192,48 @@ export const executeDelegate = async (
         // AbortError during session.create: bail silently. We never
         // produced a producer sid, so no per-attempt cleanup is needed
         // — the outer while-loop will exit on the next top-of-loop check.
-        if (err instanceof DOMException && err.name === "AbortError") {
+        if (
+          (err instanceof DOMException && err.name === "AbortError") ||
+          (err !== null && typeof err === "object" && "name" in err && err.name === "AbortError")
+        ) {
           return "";
         }
         throw err;
       }
 
       // Abort check (2): after create. We own a producer session at this
-      // point — let the per-attempt `finally` block clean it up.
+      // point — let the helper clean it up.
       if (signal?.aborted) {
-        const producerSid = extractSessionId(created);
-        if (producerSid) {
-          ctx.changedFileStore.clear(producerSid);
-          try {
-            ctx.sessionStore.unregister(producerSid);
-          } catch {
-            // non-fatal
-          }
-          try {
-            ctx.guardStore.clear(producerSid);
-          } catch {
-            // non-fatal
-          }
+        const abortedSid = extractSessionId(created);
+        if (abortedSid) {
+          cleanupProducerSession(ctx, abortedSid);
         }
         return "";
       }
 
       const producerSid = extractSessionId(created);
       if (!producerSid) {
+        const maybeSid =
+          created?.data?.id && typeof created.data.id === "string" ? created.data.id : "";
+        if (maybeSid) {
+          cleanupProducerSession(ctx, maybeSid);
+        }
+        log.warn({
+          event: "delegate.create_no_sid",
+          error: "session.create returned no usable session id",
+        });
         return "[router] delegate failed: could not create a producer session.";
       }
       // Compose with Layer 1: guard the plugin-created producer session.
       try {
         ctx.sessionStore.registerProducerSession(producerSid, tier, activeCfg);
-      } catch {
-        // non-fatal
+      } catch (err) {
+        log.warn({
+          event: "delegate.register_failed",
+          sid: producerSid,
+          tier,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
 
       try {
@@ -442,17 +483,7 @@ export const executeDelegate = async (
         // Always runs — even on timeout, abort, or throw from
         // session.prompt / gate — so a single stuck or cancelled subagent
         // cannot leak tracking entries forever.
-        ctx.changedFileStore.clear(producerSid);
-        try {
-          ctx.sessionStore.unregister(producerSid);
-        } catch {
-          // non-fatal
-        }
-        try {
-          ctx.guardStore.clear(producerSid);
-        } catch {
-          // non-fatal
-        }
+        cleanupProducerSession(ctx, producerSid);
       }
     }
   } catch (err) {
