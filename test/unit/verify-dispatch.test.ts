@@ -748,6 +748,129 @@ describe("verifyTaskAfterHook", () => {
     expect(clearGuardCalls).toHaveLength(1);
   });
 
+  // -------------------------------------------------------------------------
+  // SDD: plan 007 — Task child session must be torn down at the SDK layer
+  // so it does not leak as an orphan session in the TUI session list. The
+  // previous fix-orphan-subagent-sessions PR cleared the plugin stores but
+  // did not call session.abort() / session.delete(). These tests pin the
+  // SDK teardown contract.
+  // -------------------------------------------------------------------------
+
+  it("aborts and deletes the Task child session on successful verification", async () => {
+    process.env.MODEL_ROUTER_ENFORCE = "1";
+    writeFileSync(join(workDir, "present.txt"), "ok");
+
+    const abortCalls: string[] = [];
+    const deleteCalls: string[] = [];
+
+    const ctx = makeCtx({
+      directory: workDir,
+      abortImpl: async (req: any) => {
+        abortCalls.push(req?.path?.id);
+        return { data: true };
+      },
+      deleteImpl: async (req: any) => {
+        deleteCalls.push(req?.path?.id);
+        return { data: true };
+      },
+    });
+
+    const input = {
+      tool: "task",
+      sessionID: "orch",
+      args: {
+        subagent_type: "fast",
+        prompt:
+          "Create the file.\n[acceptance]\ncheck: fileExists path=present.txt\n[/acceptance]",
+      },
+    };
+    const output = {
+      output: "<task_result>\nDONE.</task_result>",
+      metadata: { sessionId: "child-success" },
+    };
+
+    await verifyTaskAfterHook(ctx, input, output);
+
+    expect(abortCalls).toEqual(["child-success"]);
+    expect(deleteCalls).toEqual(["child-success"]);
+  });
+
+  it("still attempts delete when task child session.abort throws (best-effort isolation)", async () => {
+    process.env.MODEL_ROUTER_ENFORCE = "1";
+    writeFileSync(join(workDir, "present.txt"), "ok");
+
+    const deleteCalls: string[] = [];
+
+    const ctx = makeCtx({
+      directory: workDir,
+      abortImpl: async () => {
+        throw new Error("abort boom");
+      },
+      deleteImpl: async (req: any) => {
+        deleteCalls.push(req?.path?.id);
+        return { data: true };
+      },
+    });
+
+    const input = {
+      tool: "task",
+      sessionID: "orch",
+      args: {
+        subagent_type: "fast",
+        prompt:
+          "Create the file.\n[acceptance]\ncheck: fileExists path=present.txt\n[/acceptance]",
+      },
+    };
+    const output = {
+      output: "<task_result>\nDONE.</task_result>",
+      metadata: { sessionId: "child-success" },
+    };
+
+    await verifyTaskAfterHook(ctx, input, output);
+
+    // abort failure must not block delete.
+    expect(deleteCalls).toEqual(["child-success"]);
+  });
+
+  it("aborts and deletes the Task child session even when verification rejects", async () => {
+    process.env.MODEL_ROUTER_ENFORCE = "1";
+    // Missing file -> deterministic fail -> forcing note appended.
+    // Cleanup must STILL run on a non-passing verdict.
+    const abortCalls: string[] = [];
+    const deleteCalls: string[] = [];
+
+    const ctx = makeCtx({
+      directory: workDir,
+      abortImpl: async (req: any) => {
+        abortCalls.push(req?.path?.id);
+        return { data: true };
+      },
+      deleteImpl: async (req: any) => {
+        deleteCalls.push(req?.path?.id);
+        return { data: true };
+      },
+    });
+
+    const input = {
+      tool: "task",
+      sessionID: "orch",
+      args: {
+        subagent_type: "fast",
+        prompt:
+          "Create the file.\n[acceptance]\ncheck: fileExists path=present.txt\n[/acceptance]",
+      },
+    };
+    const output = {
+      output: "<task_result>\nDONE.</task_result>",
+      metadata: { sessionId: "child-fail" },
+    };
+
+    await verifyTaskAfterHook(ctx, input, output);
+
+    expect(abortCalls).toEqual(["child-fail"]);
+    expect(deleteCalls).toEqual(["child-fail"]);
+  });
+
   it("clears all three stores once even when verification rejects", async () => {
     process.env.MODEL_ROUTER_ENFORCE = "1";
     // Missing file -> deterministic fail -> forcing note appended.

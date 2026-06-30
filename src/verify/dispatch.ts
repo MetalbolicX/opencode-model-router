@@ -463,6 +463,31 @@ export const verifyTaskAfterHook = async (
       } catch {
         // non-fatal
       }
+      // SDK teardown — removes the child session from the TUI session list.
+      // Use short timeouts so a stuck SDK cleanup call cannot hang the
+      // tool.execute.after hook forever. Each call is best-effort and
+      // independently wrapped so a failure from one never blocks the other,
+      // and the finally block never throws. The child has already returned
+      // its result by the time we reach here, but the timeout is a
+      // defense-in-depth in case the SDK is slow or stuck.
+      try {
+        await withTimeout(
+          ctx.plugin.client.session.abort({ path: { id: childSessionID } }),
+          10_000,
+          "task child session.abort",
+        );
+      } catch {
+        // best-effort: cleanup MUST never throw out of the finally block.
+      }
+      try {
+        await withTimeout(
+          ctx.plugin.client.session.delete({ path: { id: childSessionID } }),
+          10_000,
+          "task child session.delete",
+        );
+      } catch {
+        // best-effort: cleanup MUST never throw out of the finally block.
+      }
     }
   }
 };
