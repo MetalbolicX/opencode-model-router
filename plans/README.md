@@ -15,7 +15,7 @@ and update your row when done.
 | 003  | Fix config mutation side effect in commands.ts | P1 | S | LOW | — | DONE |
 | 004  | Strengthen AbortError detection in delegate.ts | P2 | S | LOW | — | DONE |
 | 005  | Eliminate duplicated READ_ONLY_TOOLS set | P2 | S | LOW | — | DONE |
-| 006  | Replace cast-heavy type narrowing with runtime guards in hooks.ts | P2 | S | LOW | — | TODO |
+| 006  | Replace cast-heavy type narrowing with runtime guards in hooks.ts | P2 | S | LOW | — | DONE |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale).
 

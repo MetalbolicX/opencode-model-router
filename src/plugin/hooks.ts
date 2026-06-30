@@ -29,6 +29,7 @@ import { log } from "../utils/observability";
 import { verifyTaskAfterHook } from "../verify/dispatch";
 import type { PluginContext } from "./context";
 import type { HookEventPayload, HookPayload } from "./types";
+import { asChatMessageInput, asToolCallInput } from "./types";
 
 // ---------------------------------------------------------------------------
 // chat.params — temperature override for open grader sessions.
@@ -68,17 +69,14 @@ export const handleChatMessage = async (
   // value on read failure.
   const cfg = await ctx.getFreshConfig();
   const tierNames = Object.keys(getActiveTiers(cfg));
-  ctx.sessionStore.registerFromChatMessage(
-    input as { agent?: string; sessionID: string },
-    output,
-    cfg,
-    tierNames,
-  );
+  const chatInput = asChatMessageInput(input);
+  if (!chatInput) return; // fail-soft: malformed payload
+  ctx.sessionStore.registerFromChatMessage(chatInput, output, cfg, tierNames);
 
   // Record-only: initialise a trajectory scorecard for tracked subagents.
-  const sid = input?.sessionID as string | undefined;
-  if (sid && ctx.sessionStore.isSubagent(sid)) {
-    ctx.trajectoryStore.ensure(sid, (input?.agent as string | undefined) ?? null);
+  const sid = chatInput.sessionID;
+  if (ctx.sessionStore.isSubagent(sid)) {
+    ctx.trajectoryStore.ensure(sid, chatInput.agent ?? null);
   }
 };
 
@@ -134,10 +132,10 @@ export const handleToolExecuteAfter = async (
   output: HookPayload,
 ): Promise<void> => {
   if (ctx.state.bypassed) return;
-  ctx.sessionStore.recordToolCall(
-    input as { sessionID: string; tool: string; args: unknown },
-    output,
-  );
+  const toolInput = asToolCallInput(input);
+  if (toolInput) {
+    ctx.sessionStore.recordToolCall(toolInput, output);
+  }
 
   // Record-only trajectory observation (mutates internal maps only; never
   // touches output, so emitted banners/observations stay byte-identical).

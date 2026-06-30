@@ -124,6 +124,54 @@ export const asTaskToolArgs = (args: unknown): TaskToolArgs | null => {
   return out;
 };
 
+/**
+ * Narrow shape consumed by `SessionStore.registerFromChatMessage`.
+ */
+export interface ChatMessageInput {
+  sessionID: string;
+  agent?: string;
+}
+
+/**
+ * Narrow an unknown hook payload to the shape `registerFromChatMessage`
+ * expects. Returns `null` when the payload is not an object or lacks a
+ * string `sessionID`. `agent` stays optional.
+ */
+export const asChatMessageInput = (v: unknown): ChatMessageInput | null => {
+  if (!v || typeof v !== "object") return null;
+  const rec = v as Record<string, unknown>;
+  if (typeof rec["sessionID"] !== "string") return null;
+  const out: ChatMessageInput = { sessionID: rec["sessionID"] };
+  if (typeof rec["agent"] === "string") {
+    out.agent = rec["agent"];
+  }
+  return out;
+};
+
+/**
+ * Narrow shape consumed by `SessionStore.recordToolCall`.
+ */
+export interface ToolCallInput {
+  sessionID: string;
+  tool: string;
+  args: unknown;
+}
+
+/**
+ * Narrow an unknown hook payload to the shape `recordToolCall` expects.
+ * Returns `null` when the payload is not an object, lacks string
+ * `sessionID` / `tool` fields, or has no `args` property. The store
+ * signature requires `args: unknown` (not optional).
+ */
+export const asToolCallInput = (v: unknown): ToolCallInput | null => {
+  if (!v || typeof v !== "object") return null;
+  const rec = v as Record<string, unknown>;
+  if (typeof rec["sessionID"] !== "string") return null;
+  if (typeof rec["tool"] !== "string") return null;
+  if (!("args" in rec)) return null;
+  return { sessionID: rec["sessionID"], tool: rec["tool"], args: rec["args"] };
+};
+
 // ---------------------------------------------------------------------------
 // Hook IO shapes
 // ---------------------------------------------------------------------------
