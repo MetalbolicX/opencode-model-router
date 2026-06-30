@@ -95,6 +95,18 @@ export const handleToolExecuteBefore = async (
   if (!sid || !ctx.sessionStore.isSubagent(sid) || typeof tool !== "string") {
     return;
   }
+  // Fail-fast nested-delegation guard: a subagent session must never call the
+  // built-in `task` tool. Creating child sessions under a subagent session
+  // hangs the opencode runtime permanently (see `verifyTaskAfterHook` parent
+  // handling and `src/verify/dispatch.ts` for the prior debugging notes). The
+  // session store tracks subagent identity but not parent/depth, so the only
+  // signal we need here is `isSubagent(sid) && tool === "task"`. Blocking at
+  // the before-hook keeps the unsafe path from ever creating a grandchild.
+  if (tool === "task") {
+    throw new Error(
+      "Nested subagent delegation is not allowed: subagent sessions cannot call the built-in task tool",
+    );
+  }
   let res: BeforeResult;
   try {
     const cfg = await ctx.getConfig();

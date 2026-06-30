@@ -17,6 +17,8 @@ and update your row when done.
 | 005  | Eliminate duplicated READ_ONLY_TOOLS set | P2 | S | LOW | — | DONE |
 | 006  | Replace cast-heavy type narrowing with runtime guards in hooks.ts | P2 | S | LOW | — | DONE |
 | 007  | Abort and delete Task child session to prevent TUI orphans | P1 | S | LOW | — | DONE |
+| 008  | Block nested built-in Task delegation from subagents | P1 | S | LOW | — | DONE |
+| 009  | TUI plugin to restore parent session on child deletion | P1 | M | MED | — | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale).
 

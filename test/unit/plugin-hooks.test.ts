@@ -459,6 +459,93 @@ describe("handleToolExecuteBefore — guard block throws", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Plan 008 — block nested built-in task delegation from subagent sessions.
+//
+// The before-hook must reject `tool === "task"` only when the current
+// session is recognised as a subagent (`ctx.sessionStore.isSubagent(sid)`).
+// The guard depends on no other session metadata — it does not need
+// parent/depth tracking. Non-subagent sessions and non-`task` tools must
+// keep their pre-plan behaviour.
+// ---------------------------------------------------------------------------
+
+describe("handleToolExecuteBefore — nested task delegation guard (plan 008)", () => {
+  it("allows the built-in task tool for non-subagent (root/orchestrator) sessions", async () => {
+    const h = makeHarness();
+    // sid-NON-SUB is not a subagent (harness only marks sid-A1 as one).
+    await expect(
+      handleToolExecuteBefore(h.ctx, { sessionID: "sid-NON-SUB", tool: "task" }, { args: {} }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("allows non-task tools for subagent sessions (continues to guardBeforeCall)", async () => {
+    const h = makeHarness();
+    // sid-A1 IS a subagent. The guard must only block task; other tools
+    // keep their existing pre-plan flow (early-return after isSubagent
+    // check, then continue to guardBeforeCall).
+    for (const t of ["read", "write", "bash", "grep", "glob"]) {
+      await expect(
+        handleToolExecuteBefore(h.ctx, { sessionID: "sid-A1", tool: t }, { args: {} }),
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  it("blocks the built-in task tool for subagent sessions with the deterministic error", async () => {
+    const h = makeHarness();
+    await expect(
+      handleToolExecuteBefore(
+        h.ctx,
+        { sessionID: "sid-A1", tool: "task", args: { subagent_type: "fast" } },
+        { args: { subagent_type: "fast" } },
+      ),
+    ).rejects.toThrow(
+      "Nested subagent delegation is not allowed: subagent sessions cannot call the built-in task tool",
+    );
+  });
+
+  it("throws the exact error message specified in plan 008", async () => {
+    const h = makeHarness();
+    let captured: Error | undefined;
+    try {
+      await handleToolExecuteBefore(
+        h.ctx,
+        { sessionID: "sid-A1", tool: "task" },
+        { args: {} },
+      );
+    } catch (e) {
+      captured = e as Error;
+    }
+    expect(captured).toBeDefined();
+    expect(captured?.message).toBe(
+      "Nested subagent delegation is not allowed: subagent sessions cannot call the built-in task tool",
+    );
+  });
+
+  it("guard depends only on isSubagent(sid) && tool === 'task' (no parent/depth metadata required)", async () => {
+    const h = makeHarness();
+    // Force isSubagent to return true for ANY sid — the guard must still
+    // fire for task and not fire for other tools. Proves the guard has
+    // no implicit dependency on parent/depth session metadata.
+    h.ctx.sessionStore.isSubagent = () => true;
+
+    await expect(
+      handleToolExecuteBefore(
+        h.ctx,
+        { sessionID: "sid-X", tool: "task" },
+        { args: {} },
+      ),
+    ).rejects.toThrow(/Nested subagent delegation is not allowed/);
+
+    await expect(
+      handleToolExecuteBefore(
+        h.ctx,
+        { sessionID: "sid-X", tool: "read" },
+        { args: {} },
+      ),
+    ).resolves.toBeUndefined();
+  });
+});
+
 describe("handleToolExecuteAfter — verifyTaskAfterHook contract", () => {
   it("records changed files for any session, including non-subagent", async () => {
     const h = makeHarness();
