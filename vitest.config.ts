@@ -13,6 +13,8 @@ export default defineConfig({
     include: ["test/**/*.test.ts"],
     exclude: ["test/smoke/**", "node_modules/**", "dist/**", "tmp/**"],
     environment: "node",
+    // @ts-expect-error — forbidOnly exists at runtime but the v4 type def is stale
+    forbidOnly: true,
     server: {
       deps: {
         inline: ["@opencode-ai/plugin"],

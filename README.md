@@ -196,6 +196,21 @@ Then install and configure model-router to handle the rest.
 
 ## Installation
 
+### Quick install (recommended)
+```bash
+npx opencode-model-router install
+```
+
+This adds the plugin to your global opencode config. Restart opencode to activate.
+
+Other commands:
+```bash
+omr install              # Install plugin to global config
+omr uninstall            # Remove plugin from global config
+omr status               # Check installation status
+omr doctor               # Validate config health
+```
+
 ### From npm (recommended)
 ```bash
 # In your opencode project or globally
@@ -205,12 +220,8 @@ npm install -g opencode-model-router
 Add to `~/.config/opencode/opencode.json`:
 ```json
 {
-  "plugin": {
-    "opencode-model-router": {
-      "type": "npm",
-      "package": "opencode-model-router"
-    }
-  }
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-model-router"]
 }
 ```
 
@@ -224,12 +235,8 @@ npm install
 In `~/.config/opencode/opencode.json`:
 ```json
 {
-  "plugin": {
-    "opencode-model-router": {
-      "type": "local",
-      "path": "/absolute/path/to/opencode-model-router"
-    }
-  }
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-model-router@/absolute/path/to/opencode-model-router"]
 }
 ```
 
