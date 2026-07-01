@@ -6,5 +6,9 @@
     "medium": 5,
     "heavy": 3
   },
-  "defaultTier": "medium"
+  "defaultTier": "medium",
+  "reasoningPolicy": {
+    "mode": "manual",
+    "surfaceLimits": false
+  }
 }

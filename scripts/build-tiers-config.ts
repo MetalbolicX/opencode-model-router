@@ -60,14 +60,16 @@ const PART_PATHS: Record<PartName, string> = {
 //   2. prompts         → tierPrompts
 //   3. presets         → presets
 //   4. task-patterns   → taskPatterns, modes, fallback, rules
-//   5. base            → defaultTier (originally written last in the
-//                        single-file `tiers.json`)
+//   5. base            → defaultTier, reasoningPolicy (reasoningPolicy is
+//                        appended after defaultTier so it sits at the end
+//                        of the merged `tiers.json`, matching its place in
+//                        `base.json`).
 const MERGE_PLAN: Array<{ part: PartName; keys?: string[] }> = [
   { part: "base", keys: ["activePreset", "activeMode", "tierCaps"] },
   { part: "prompts" },
   { part: "presets" },
   { part: "task-patterns" },
-  { part: "base", keys: ["defaultTier"] },
+  { part: "base", keys: ["defaultTier", "reasoningPolicy"] },
 ];
 
 const partCache = new Map<PartName, Record<string, unknown>>();

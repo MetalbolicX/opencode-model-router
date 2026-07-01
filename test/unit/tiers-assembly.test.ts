@@ -33,6 +33,10 @@ const ASSEMBLER_PATH = join(REPO_ROOT, "scripts", "build-tiers-config.ts");
 // the original single-file key order. Phase 6 invariant: the merge
 // plan in scripts/build-tiers-config.ts must produce exactly this
 // order; any drift is a behavior change.
+//
+// `reasoningPolicy` was added by Plan 010 PR 3 and sits at the end of
+// the merged tiers.json (after `defaultTier`) per the merge-plan step
+// in scripts/build-tiers-config.ts.
 const EXPECTED_KEY_ORDER = [
   "activePreset",
   "activeMode",
@@ -44,6 +48,7 @@ const EXPECTED_KEY_ORDER = [
   "fallback",
   "rules",
   "defaultTier",
+  "reasoningPolicy",
 ] as const;
 
 interface PartSpec {
@@ -56,7 +61,7 @@ const PARTS: readonly PartSpec[] = [
   {
     label: "base.json",
     path: join(TIERS_DIR, "base.json"),
-    expectedKeys: ["activePreset", "activeMode", "tierCaps", "defaultTier"],
+    expectedKeys: ["activePreset", "activeMode", "tierCaps", "defaultTier", "reasoningPolicy"],
   },
   {
     label: "presets.json",

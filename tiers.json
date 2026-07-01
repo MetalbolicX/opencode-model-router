@@ -18,6 +18,9 @@
         "costRatio": 1,
         "description": "Haiku 4.5 for exploration, search, and simple reads",
         "steps": 30,
+        "capability": {
+          "kind": "none"
+        },
         "whenToUse": [
           "Codebase exploration and search",
           "Simple file reads and listing",
@@ -31,6 +34,11 @@
         "costRatio": 5,
         "description": "Sonnet 4.6 max for implementation, refactoring, and tests",
         "steps": 50,
+        "capability": {
+          "kind": "binary",
+          "field": "variant",
+          "elevated": "max"
+        },
         "whenToUse": [
           "Feature implementation",
           "Refactoring",
@@ -45,6 +53,11 @@
         "costRatio": 20,
         "description": "Opus 4.8 max for architecture, complex debugging, and security",
         "steps": 120,
+        "capability": {
+          "kind": "binary",
+          "field": "variant",
+          "elevated": "max"
+        },
         "whenToUse": [
           "Architecture decisions",
           "Complex debugging (after 2+ failures)",
@@ -59,6 +72,9 @@
         "costRatio": 1,
         "description": "GPT-5.4 Mini Fast for fast exploration and simple tasks",
         "steps": 30,
+        "capability": {
+          "kind": "none"
+        },
         "whenToUse": [
           "Codebase exploration and search",
           "Simple file reads",
@@ -71,6 +87,15 @@
         "costRatio": 5,
         "description": "GPT-5.5 fast default settings for implementation and standard coding",
         "steps": 50,
+        "capability": {
+          "kind": "discrete",
+          "field": "variant",
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
         "whenToUse": [
           "Feature implementation",
           "Refactoring",
@@ -84,6 +109,16 @@
         "costRatio": 20,
         "description": "GPT-5.4 xhigh for architecture and complex tasks",
         "steps": 120,
+        "capability": {
+          "kind": "discrete",
+          "field": "variant",
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        },
         "whenToUse": [
           "Architecture decisions",
           "Complex debugging (after 2+ failures)",
@@ -98,6 +133,9 @@
         "costRatio": 1,
         "description": "Claude Haiku 4.5 via GitHub Copilot for fast exploration and simple tasks",
         "steps": 30,
+        "capability": {
+          "kind": "none"
+        },
         "whenToUse": [
           "Codebase exploration and search",
           "Simple file reads and listing",
@@ -110,6 +148,9 @@
         "costRatio": 5,
         "description": "Claude Sonnet 4.5 via GitHub Copilot for implementation, refactoring, and tests",
         "steps": 50,
+        "capability": {
+          "kind": "none"
+        },
         "whenToUse": [
           "Feature implementation",
           "Refactoring",
@@ -124,6 +165,11 @@
         "costRatio": 20,
         "description": "Claude Opus 4.6 via GitHub Copilot for architecture, complex debugging, and security",
         "steps": 120,
+        "capability": {
+          "kind": "binary",
+          "field": "variant",
+          "elevated": "thinking"
+        },
         "whenToUse": [
           "Architecture decisions",
           "Complex debugging (after 2+ failures)",
@@ -138,6 +184,9 @@
         "costRatio": 1,
         "description": "Gemini 2.5 Flash for fast exploration and simple tasks",
         "steps": 30,
+        "capability": {
+          "kind": "none"
+        },
         "whenToUse": [
           "Codebase exploration and search",
           "Simple file reads and listing",
@@ -150,6 +199,9 @@
         "costRatio": 5,
         "description": "Gemini 2.5 Pro for implementation, refactoring, and tests",
         "steps": 50,
+        "capability": {
+          "kind": "none"
+        },
         "whenToUse": [
           "Feature implementation",
           "Refactoring",
@@ -163,6 +215,9 @@
         "costRatio": 20,
         "description": "Gemini 3 Pro Preview for architecture, complex debugging, and security",
         "steps": 120,
+        "capability": {
+          "kind": "none"
+        },
         "whenToUse": [
           "Architecture decisions",
           "Complex debugging (after 2+ failures)",
@@ -177,6 +232,9 @@
         "costRatio": 1,
         "description": "Haiku 4.5 for exploration, search, and simple reads",
         "steps": 30,
+        "capability": {
+          "kind": "none"
+        },
         "whenToUse": [
           "Codebase exploration and search",
           "Simple file reads and listing",
@@ -190,6 +248,15 @@
         "costRatio": 5,
         "description": "GPT-5.5 fast default settings for implementation and standard coding",
         "steps": 50,
+        "capability": {
+          "kind": "discrete",
+          "field": "variant",
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
         "whenToUse": [
           "Feature implementation",
           "Refactoring",
@@ -203,6 +270,11 @@
         "costRatio": 20,
         "description": "Claude Opus 4.8 max for architecture, complex debugging, and security",
         "steps": 120,
+        "capability": {
+          "kind": "binary",
+          "field": "variant",
+          "elevated": "max"
+        },
         "whenToUse": [
           "Architecture decisions",
           "Complex debugging (after 2+ failures)",
@@ -218,6 +290,15 @@
         "costRatio": 1,
         "description": "Mimo v2.5 for fast exploration and simple tasks",
         "steps": 30,
+        "capability": {
+          "kind": "discrete",
+          "field": "variant",
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
         "whenToUse": [
           "Codebase exploration and search",
           "Simple file reads and listing",
@@ -231,6 +312,11 @@
         "costRatio": 5,
         "description": "MiniMax M3 for implementation, refactoring, and tests",
         "steps": 50,
+        "capability": {
+          "kind": "binary",
+          "field": "variant",
+          "elevated": "thinking"
+        },
         "whenToUse": [
           "Feature implementation",
           "Refactoring",
@@ -247,6 +333,15 @@
         "reasoning": {
           "effort": "high",
           "summary": "detailed"
+        },
+        "capability": {
+          "kind": "discrete",
+          "field": "reasoning.effort",
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ]
         },
         "whenToUse": [
           "Architecture decisions",
@@ -374,5 +469,9 @@
     "if self is opus: skip-@heavy (do locally); still prefer routing broader read-only exploration to @fast",
     "min(cost, adequate-tier)"
   ],
-  "defaultTier": "medium"
+  "defaultTier": "medium",
+  "reasoningPolicy": {
+    "mode": "manual",
+    "surfaceLimits": false
+  }
 }
