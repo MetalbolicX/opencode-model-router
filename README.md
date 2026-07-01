@@ -604,10 +604,37 @@ Applies to all models, not only Claude — but the prompt-level clause is Claude
 | `costRatio` | number | Relative cost (1 = cheapest). Shown in prompt. |
 | `thinking` | object | Anthropic thinking: `{ "budgetTokens": 10000 }` |
 | `reasoning` | object | OpenAI reasoning: `{ "effort": "high", "summary": "detailed" }` |
+| `capability` | object | Explicit reasoning capability. Authoritative when present; otherwise `inferCapability` walks `reasoning.effort` / `thinking.budgetTokens` / `variant`. See [REASONING.md](./docs/REASONING.md). |
 | `description` | string | Shown in `/tiers` output |
 | `steps` | number | Max agent turns |
 | `prompt` | string | Optional per-tier system prompt override. Falls back to top-level `tierPrompts[<tierName>]` when omitted. |
 | `whenToUse` | string[] | Use cases (shown in `/tiers`, not in system prompt) |
+
+### Reasoning control
+
+Per-tier reasoning is now configurable at runtime via the `/reasoning` command and an optional `reasoningPolicy` block in `tiers.json`. See [docs/REASONING.md](./docs/REASONING.md) for the full capability model, normalized level vocabulary, translation rules, and the documented 3-level-ladder collapse quirk.
+
+Minimal example:
+
+```jsonc
+{
+  "reasoningPolicy": {
+    "mode": "manual",        // "static" | "manual" | "adaptive". Default: "static" when the block is absent.
+    "surfaceLimits": false   // Set true to log + chat-advisory when a tier can't satisfy a requested level.
+  },
+  "presets": {
+    "multi-provider": {
+      "fast": {
+        "model": "opencode-go/mimo-v2.5",
+        "variant": "medium",
+        "capability": { "kind": "discrete", "field": "variant", "levels": ["low", "medium", "high"] }
+      }
+    }
+  }
+}
+```
+
+All fields are optional. A config without `reasoningPolicy` is byte-identical to pre-Plan-010 behaviour.
 
 ### Fallback
 

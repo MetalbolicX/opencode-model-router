@@ -1,8 +1,8 @@
-# Enforcement Configuration Reference
+# Configuration Reference
 
-Optional `enforcement` block in `tiers.json`. Fully additive — omitting the block (or setting `mode: "off"`) is a strict no-op; the plugin behaves byte-for-byte as without the block.
+Top-level `tiers.json` fields. All blocks are optional and additive; omitting a block (or setting the equivalent no-op value) preserves the pre-Plan-010 behaviour byte-for-byte.
 
-**Cross-references:** [ENFORCEMENT.md](./ENFORCEMENT.md) · [VERIFICATION.md](./VERIFICATION.md) · [ESCALATION.md](./ESCALATION.md) · [ENFORCEMENT_PRESETS.md](./ENFORCEMENT_PRESETS.md)
+**Cross-references:** [ENFORCEMENT.md](./ENFORCEMENT.md) · [REASONING.md](./REASONING.md) · [VERIFICATION.md](./VERIFICATION.md) · [ESCALATION.md](./ESCALATION.md) · [ENFORCEMENT_PRESETS.md](./ENFORCEMENT_PRESETS.md)
 
 ---
 
@@ -72,6 +72,69 @@ Optional `enforcement` block in `tiers.json`. Fully additive — omitting the bl
 | `trivialClassifier` | `string` | `"dispatchIntent"` | Classifier strategy used to detect trivial tasks. |
 
 > **Note:** `trivialBypass` defaults `true` but trivial classification is tier-gated to `fast` and biased toward non-trivial. Real work is never silently downgraded.
+
+---
+
+## `reasoningPolicy`
+
+Optional top-level block in `tiers.json`. Fully additive — omitting the block resolves to `mode: "static"`, which is a hard no-op (the policy resolver returns `null` regardless of any session override, and the agent def is left exactly as `registerTierAgents` produced it). The bundled default since Plan 010 PR 3 is `mode: "manual"`, which lets the `/reasoning` command apply session-scoped overrides.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `mode` | `"static" \| "manual" \| "adaptive"` | `"static"` when the block is absent, `"manual"` in the bundled `base.json` | See [Policy modes](#policy-modes) below. |
+| `defaultLevel` | `"minimal" \| "normal" \| "elevated" \| "max"` | _(none)_ | Optional fallback applied under `manual` mode when the session has no override. |
+| `surfaceLimits` | `boolean` | `false` | When `true`, `/reasoning` output and the runtime log layer flag tiers that cannot satisfy the requested level. See [REASONING.md → surfaceLimits](./REASONING.md#surfacelimits). |
+
+### Policy modes
+
+| Mode | Behaviour |
+|---|---|
+| `static` | The policy resolver ALWAYS returns `null`. Even when a session override exists, the agent def is left exactly as `registerTierAgents` produced it. Use this to restore pre-Plan-010 byte-identical behaviour. |
+| `manual` | Translates `sessionOverride ?? defaultLevel` through the tier's `capability` (or `inferCapability(tier)` when no capability is declared). When both are undefined, returns `null`. |
+| `adaptive` | Stub. Returns `null`. A follow-up plan will wire an adaptive engine that picks a level from task-class / risk signals. |
+
+### Per-tier `capability`
+
+Optional field on every tier (`presets[<name>].<tier>.capability`). Authoritative when present; otherwise `inferCapability(tier)` walks `reasoning.effort`, `thinking.budgetTokens`, then `variant` (positional vs named split) and returns the inferred shape.
+
+| `kind` | `field` | Shape | When to use |
+|---|---|---|---|
+| `none` | _(omitted)_ | `{ kind: "none" }` | The tier exposes no reasoning control. Router never mutates it. |
+| `binary` | `"variant"` | `{ kind: "binary"; field: "variant"; baseline?: string; elevated: string }` | Two-state toggle (e.g. default ↔ `thinking`, default ↔ `max`). `minimal`/`normal` resolve to `baseline` (or `null` if omitted); `elevated`/`max` resolve to `elevated`. |
+| `discrete` | `"variant"` _or_ `"reasoning.effort"` | `{ kind: "discrete"; field: ...; levels: string[] }` | N-state ladder (e.g. `[low, medium, high]` or `[low, medium, high, xhigh]`). The `field` discriminator picks the output channel. |
+| `budgeted` | `"thinking.budgetTokens"` | `{ kind: "budgeted"; field: "thinking.budgetTokens"; recommended: Record<level, number> }` | Token-budget ladder. `recommended` MUST cover all four levels. |
+
+### Minimal example
+
+```jsonc
+{
+  "reasoningPolicy": {
+    "mode": "manual",
+    "surfaceLimits": false
+  },
+  "presets": {
+    "multi-provider": {
+      "fast": {
+        "model": "opencode-go/mimo-v2.5",
+        "variant": "medium",
+        "capability": { "kind": "discrete", "field": "variant", "levels": ["low", "medium", "high"] }
+      },
+      "medium": {
+        "model": "minimax/MiniMax-M3",
+        "variant": "thinking",
+        "capability": { "kind": "binary", "field": "variant", "elevated": "thinking" }
+      },
+      "heavy": {
+        "model": "openai/gpt-5.4",
+        "reasoning": { "effort": "high", "summary": "detailed" },
+        "capability": { "kind": "discrete", "field": "reasoning.effort", "levels": ["low", "medium", "high"] }
+      }
+    }
+  }
+}
+```
+
+All fields are optional. A config with no `reasoningPolicy` block and no per-tier `capability` declarations is byte-identical to pre-Plan-010 behaviour. See [REASONING.md](./REASONING.md) for the full capability model, normalized level vocabulary, translation rules, and the documented 3-level-ladder collapse quirk.
 
 ---
 

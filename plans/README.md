@@ -19,7 +19,7 @@ and update your row when done.
 | 007  | Abort and delete Task child session to prevent TUI orphans | P1 | S | LOW | — | DONE |
 | 008  | Block nested built-in Task delegation from subagents | P1 | S | LOW | — | DONE |
 | 009  | TUI plugin to restore parent session on child deletion | P1 | M | MED | — | TODO |
-| 010  | Adaptive, provider-agnostic reasoning control | P1 | L | MED | — | TODO |
+| 010  | Adaptive, provider-agnostic reasoning control | P1 | L | MED | — | IN PROGRESS (PR 1 + PR 2 + PR 3 ready on stacked branches) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale).
 
