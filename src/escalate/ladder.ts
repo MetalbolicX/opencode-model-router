@@ -75,7 +75,8 @@ export const recordAttempt = (state: LadderState, costUnits = 0): LadderState =>
 export const nextTierAfter = (currentTier: string, policy: EscalatePolicy): string | null => {
   const ci = tierRank(currentTier, policy.ladder);
   if (ci >= 0 && ci + 1 <= policy.ladder.length - 1) {
-    return policy.ladder[ci + 1]!;
+    const next = policy.ladder[ci + 1];
+    return next ?? null;
   }
   return null;
 };
@@ -155,9 +156,10 @@ export const advance = (state: LadderState, action: LadderAction): LadderState =
     return { ...state, attemptsThisTier: state.attemptsThisTier + 1 };
   }
   if (action.action === "escalate") {
+    if (!action.tier) return state; // defensive — escalate always carries tier
     return {
       ...state,
-      currentTier: action.tier!,
+      currentTier: action.tier,
       attemptsThisTier: 0,
       escalations: state.escalations + 1,
     };

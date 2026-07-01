@@ -102,6 +102,8 @@ describe("Mode A end-to-end enforcement loop", () => {
     }
   });
 
+  const fakeCtx = { sessionID: "sess_modeA", abort: new AbortController().signal };
+
   // -------------------------------------------------------------------------
   // T1: auto-inferred DoD; false-finish then escalate fast->fast->medium
   // -------------------------------------------------------------------------
@@ -118,10 +120,13 @@ describe("Mode A end-to-end enforcement loop", () => {
       makeCtxWithQueues(dir, producerCalls, graderQueue) as any,
     );
 
-    const result: string = await hooks.tool.delegate.execute({
-      task: "implement the feature",
-      tier: "fast",
-    });
+    const result: string = await hooks.tool.delegate.execute(
+      {
+        task: "implement the feature",
+        tier: "fast",
+      },
+      fakeCtx,
+    );
 
     expect(result).toContain("[router ✓ accepted:");
     expect(result).not.toContain("status: unmet");
@@ -143,10 +148,13 @@ describe("Mode A end-to-end enforcement loop", () => {
       makeCtxWithQueues(dir, producerCalls, graderQueue) as any,
     );
 
-    const result: string = await hooks.tool.delegate.execute({
-      task: "implement the feature",
-      tier: "fast",
-    });
+    const result: string = await hooks.tool.delegate.execute(
+      {
+        task: "implement the feature",
+        tier: "fast",
+      },
+      fakeCtx,
+    );
 
     expect(result).toContain("[router ✓ accepted:");
     expect(producerCalls.length).toBe(1);
@@ -165,10 +173,13 @@ describe("Mode A end-to-end enforcement loop", () => {
       makeCtxWithQueues(dir, producerCalls, graderQueue, undefined, "") as any,
     );
 
-    const result: string = await hooks.tool.delegate.execute({
-      task: "implement the feature",
-      tier: "fast",
-    });
+    const result: string = await hooks.tool.delegate.execute(
+      {
+        task: "implement the feature",
+        tier: "fast",
+      },
+      fakeCtx,
+    );
 
     expect(result).toContain("[router status: unmet]");
     expect(result).toContain("attempt(s)");

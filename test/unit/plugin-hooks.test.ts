@@ -509,11 +509,7 @@ describe("handleToolExecuteBefore — nested task delegation guard (plan 008)", 
     const h = makeHarness();
     let captured: Error | undefined;
     try {
-      await handleToolExecuteBefore(
-        h.ctx,
-        { sessionID: "sid-A1", tool: "task" },
-        { args: {} },
-      );
+      await handleToolExecuteBefore(h.ctx, { sessionID: "sid-A1", tool: "task" }, { args: {} });
     } catch (e) {
       captured = e as Error;
     }
@@ -531,19 +527,11 @@ describe("handleToolExecuteBefore — nested task delegation guard (plan 008)", 
     h.ctx.sessionStore.isSubagent = () => true;
 
     await expect(
-      handleToolExecuteBefore(
-        h.ctx,
-        { sessionID: "sid-X", tool: "task" },
-        { args: {} },
-      ),
+      handleToolExecuteBefore(h.ctx, { sessionID: "sid-X", tool: "task" }, { args: {} }),
     ).rejects.toThrow(/Nested subagent delegation is not allowed/);
 
     await expect(
-      handleToolExecuteBefore(
-        h.ctx,
-        { sessionID: "sid-X", tool: "read" },
-        { args: {} },
-      ),
+      handleToolExecuteBefore(h.ctx, { sessionID: "sid-X", tool: "read" }, { args: {} }),
     ).resolves.toBeUndefined();
   });
 });

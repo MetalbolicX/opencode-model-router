@@ -23,7 +23,7 @@ export interface GuardStoreLike {
 /** Build a GuardPolicy from config for a given subagent tier. deliverableSignal
  * is null in Wave 1 (Mode A/B signal wiring lands in Wave 2/4), which disables
  * the deliverable-first clause — the honest common case (M5). */
-export const buildGuardPolicy = (cfg: RouterConfig, tier: string | null): GuardPolicy => {
+export const buildGuardPolicy = (cfg: RouterConfig, _tier: string | null): GuardPolicy => {
   const g = cfg.enforcement?.guard ?? {};
   return {
     budget: g.budget ?? DEFAULT_GUARD_BUDGET,

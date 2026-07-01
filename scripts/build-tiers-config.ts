@@ -39,7 +39,9 @@ const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "..");
 
 const TIERS_DIR = join(repoRoot, "config", "tiers");
-const OUTPUT_PATH = join(repoRoot, "tiers.json");
+const OUTPUT_PATH = process.env.TIERS_OUTPUT_PATH
+  ? join(repoRoot, process.env.TIERS_OUTPUT_PATH)
+  : join(repoRoot, "tiers.json");
 
 // One logical source file.
 type PartName = "base" | "presets" | "prompts" | "task-patterns";
@@ -146,7 +148,7 @@ const main = (): void => {
   // Write the merged output with 2-space indentation (matches the
   // original `tiers.json` style). The trailing newline is intentional
   // — POSIX text files end with a newline.
-  const output = JSON.stringify(merged, null, 2) + "\n";
+  const output = `${JSON.stringify(merged, null, 2)}\n`;
   mkdirSync(dirname(OUTPUT_PATH), { recursive: true });
   writeFileSync(OUTPUT_PATH, output, "utf-8");
 

@@ -104,6 +104,8 @@ describe("Mode B end-to-end (plan-annotation)", () => {
     }
   });
 
+  const fakeCtx = { sessionID: "sess_modeB", abort: new AbortController().signal };
+
   // -------------------------------------------------------------------------
   // B1: plan task with [acceptance] block; grader passes first try
   // -------------------------------------------------------------------------
@@ -118,11 +120,14 @@ describe("Mode B end-to-end (plan-annotation)", () => {
 
     const acceptance = "[acceptance]\ncriteria: task A is correct\n[/acceptance]";
 
-    const result: string = await hooks.tool.delegate.execute({
-      task: "task A from the plan",
-      tier: "fast",
-      acceptance,
-    });
+    const result: string = await hooks.tool.delegate.execute(
+      {
+        task: "task A from the plan",
+        tier: "fast",
+        acceptance,
+      },
+      fakeCtx,
+    );
 
     expect(result).toContain("[router ✓ accepted:");
     expect(result).not.toContain("status: unmet");
@@ -147,11 +152,14 @@ describe("Mode B end-to-end (plan-annotation)", () => {
 
     const acceptance = "[acceptance]\ncriteria: task B is correct\n[/acceptance]";
 
-    const result: string = await hooks.tool.delegate.execute({
-      task: "task B from the plan",
-      tier: "fast",
-      acceptance,
-    });
+    const result: string = await hooks.tool.delegate.execute(
+      {
+        task: "task B from the plan",
+        tier: "fast",
+        acceptance,
+      },
+      fakeCtx,
+    );
 
     expect(result).toContain("[router ✓ accepted:");
     expect(producerCalls.length).toBe(3);

@@ -15,7 +15,9 @@ import { runUninstall } from "../../src/cli/uninstall";
 // In-memory CliFs (same pattern as cli-config.test.ts)
 // ---------------------------------------------------------------------------
 
-const createMemFs = (initialFiles: Record<string, string> = {}): CliFs & { __files: Map<string, string> } => {
+const createMemFs = (
+  initialFiles: Record<string, string> = {},
+): CliFs & { __files: Map<string, string> } => {
   const files = new Map<string, string>();
   const dirs = new Set<string>();
   for (const [p, c] of Object.entries(initialFiles)) {
@@ -71,7 +73,9 @@ const createMemFs = (initialFiles: Record<string, string> = {}): CliFs & { __fil
       }
       files.delete(path);
     },
-    mkdirSync: (path) => { dirs.add(path); },
+    mkdirSync: (path) => {
+      dirs.add(path);
+    },
     readdirSync: (path) => {
       const prefix = path.endsWith("/") ? path : `${path}/`;
       const seen = new Set<string>();

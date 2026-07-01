@@ -22,7 +22,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = resolve(__dirname, "..", "..");
 const TIERS_DIR = join(REPO_ROOT, "config", "tiers");
@@ -80,25 +80,14 @@ const PARTS: readonly PartSpec[] = [
   },
 ];
 
-// Save and restore the assembled tiers.json around the test suite so
-// the build invocation does not leave the file in a modified state.
-let savedAssembled: string | null = null;
-
-beforeAll(() => {
-  savedAssembled = readFileSync(ASSEMBLED_PATH, "utf-8");
-});
-
-afterAll(() => {
-  if (savedAssembled !== null) {
-    writeFileSync(ASSEMBLED_PATH, savedAssembled, "utf-8");
-  }
-});
-
 const runAssembler = (): { stdout: string; stderr: string } => {
+  const tmpPath = join(tmpdir(), `tiers-assembled-${Date.now()}.json`);
   return {
-    stdout: execFileSync("node", ["--experimental-strip-types", ASSEMBLER_PATH], {
-      encoding: "utf-8",
-    }),
+    stdout: execFileSync(
+      "node",
+      ["--experimental-strip-types", ASSEMBLER_PATH],
+      { encoding: "utf-8", env: { ...process.env, TIERS_OUTPUT_PATH: tmpPath } },
+    ),
     stderr: "",
   };
 };
@@ -131,30 +120,39 @@ describe("tiers assembly — part files exist and parse", () => {
 // ---------------------------------------------------------------------------
 
 describe("tiers assembly — assembler invocation", () => {
-  it("runs the build script without error and writes tiers.json", () => {
+  it("runs the build script without error and writes the temp file", () => {
     const { stdout } = runAssembler();
     expect(stdout).toContain("build-tiers-config:");
-    expect(existsSync(ASSEMBLED_PATH)).toBe(true);
+    // The tmpPath is printed in stdout
+    const tmpPathMatch = stdout.match(/wrote (.+) \(/);
+    expect(tmpPathMatch).not.toBeNull();
+    expect(existsSync(tmpPathMatch![1]!)).toBe(true);
   });
 
   it("the assembled tiers.json is valid JSON and a non-null object", () => {
-    runAssembler();
-    const parsed = JSON.parse(readFileSync(ASSEMBLED_PATH, "utf-8"));
+    const { stdout } = runAssembler();
+    const tmpPathMatch = stdout.match(/wrote (.+) \(/);
+    const tmpPath = tmpPathMatch![1]!;
+    const parsed = JSON.parse(readFileSync(tmpPath, "utf-8"));
     expect(typeof parsed).toBe("object");
     expect(parsed).not.toBeNull();
     expect(Array.isArray(parsed)).toBe(false);
   });
 
   it("the assembled tiers.json has exactly the expected top-level key order", () => {
-    runAssembler();
-    const parsed = JSON.parse(readFileSync(ASSEMBLED_PATH, "utf-8")) as Record<string, unknown>;
+    const { stdout } = runAssembler();
+    const tmpPathMatch = stdout.match(/wrote (.+) \(/);
+    const tmpPath = tmpPathMatch![1]!;
+    const parsed = JSON.parse(readFileSync(tmpPath, "utf-8")) as Record<string, unknown>;
     const actual = Object.keys(parsed);
     expect(actual).toEqual([...EXPECTED_KEY_ORDER]);
   });
 
   it("every part-key is present in the assembled output (no silent drops)", () => {
-    runAssembler();
-    const assembled = JSON.parse(readFileSync(ASSEMBLED_PATH, "utf-8")) as Record<string, unknown>;
+    const { stdout } = runAssembler();
+    const tmpPathMatch = stdout.match(/wrote (.+) \(/);
+    const tmpPath = tmpPathMatch![1]!;
+    const assembled = JSON.parse(readFileSync(tmpPath, "utf-8")) as Record<string, unknown>;
     for (const part of PARTS) {
       for (const key of part.expectedKeys) {
         expect(
@@ -166,8 +164,10 @@ describe("tiers assembly — assembler invocation", () => {
   });
 
   it("all expected top-level keys are present in the assembled output", () => {
-    runAssembler();
-    const assembled = JSON.parse(readFileSync(ASSEMBLED_PATH, "utf-8")) as Record<string, unknown>;
+    const { stdout } = runAssembler();
+    const tmpPathMatch = stdout.match(/wrote (.+) \(/);
+    const tmpPath = tmpPathMatch![1]!;
+    const assembled = JSON.parse(readFileSync(tmpPath, "utf-8")) as Record<string, unknown>;
     for (const key of EXPECTED_KEY_ORDER) {
       expect(assembled[key]).toBeDefined();
     }

@@ -21,12 +21,12 @@ export default defineConfig([
     },
     external: sharedExternal,
   },
-    {
-      input: "src/cli/main.ts",
-      output: {
-        file: "dist/cli.mjs",
-        format: "esm",
-      },
-      external: sharedExternal,
+  {
+    input: "src/cli/main.ts",
+    output: {
+      file: "dist/cli.mjs",
+      format: "esm",
     },
+    external: sharedExternal,
+  },
 ]);

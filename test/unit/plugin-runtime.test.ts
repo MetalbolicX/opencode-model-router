@@ -15,7 +15,10 @@ vi.mock("../../src/plugin/delegate", async () => {
   const actual = await vi.importActual<typeof import("../../src/plugin/delegate")>(
     "../../src/plugin/delegate",
   );
-  return { ...actual, executeDelegate: (...args: unknown[]) => (executeDelegateMock as any)(...args) };
+  return {
+    ...actual,
+    executeDelegate: (...args: unknown[]) => (executeDelegateMock as any)(...args),
+  };
 });
 
 const handleCommandBeforeMock = vi.fn();
@@ -23,7 +26,10 @@ vi.mock("../../src/router/commands", async () => {
   const actual = await vi.importActual<typeof import("../../src/router/commands")>(
     "../../src/router/commands",
   );
-  return { ...actual, handleCommandBefore: (...args: unknown[]) => (handleCommandBeforeMock as any)(...args) };
+  return {
+    ...actual,
+    handleCommandBefore: (...args: unknown[]) => (handleCommandBeforeMock as any)(...args),
+  };
 });
 
 // ---------------------------------------------------------------------------
@@ -81,16 +87,20 @@ const makeCtx = (): PluginContext => {
     recordToolCall: () => undefined,
   };
   const guardStore = { get: () => null, clear: () => undefined };
-  const trajectoryStore = { ensure: () => undefined, recordToolEvent: () => undefined, dump: () => null };
+  const trajectoryStore = {
+    ensure: () => undefined,
+    recordToolEvent: () => undefined,
+    dump: () => null,
+  };
   const changedFileStore = { record: () => undefined, get: () => [], clear: () => undefined };
 
   return {
     plugin: { directory: tmpCwd, client: {} as any } as any,
     initialConfig: {} as any,
     activeTiersAtLoad: {} as any,
-    getConfig: async () => ({} as any),
-    refreshConfig: async () => ({} as any),
-    getFreshConfig: async () => ({} as any),
+    getConfig: async () => ({}) as any,
+    refreshConfig: async () => ({}) as any,
+    getFreshConfig: async () => ({}) as any,
     dispose: vi.fn().mockResolvedValue(undefined),
     state: { bypassed: false, cleanupTasks: [], shutdownStarted: false },
     sessionStore: sessionStore as any,
@@ -165,22 +175,25 @@ describe("assembleRuntimeHooks — hook shape", () => {
 describe("assembleRuntimeHooks — delegate tool gating", () => {
   it("omits the delegate tool when enableDelegateTool is false", () => {
     const hooks = assembleRuntimeHooks(makeCtx(), makePreset(), false);
-    expect(("delegate" in (hooks["tool"] as object))).toBe(false);
+    expect("delegate" in (hooks["tool"] as object)).toBe(false);
   });
 
   it("includes the delegate tool when enableDelegateTool is true", () => {
     const hooks = assembleRuntimeHooks(makeCtx(), makePreset(), true);
     const toolObj = hooks["tool"] as Record<string, unknown>;
-    expect(("delegate" in toolObj)).toBe(true);
+    expect("delegate" in toolObj).toBe(true);
     const delegate = toolObj["delegate"] as Record<string, unknown>;
     expect(typeof delegate.description).toBe("string");
-    expect((delegate.args as Record<string, unknown>)).toHaveProperty("task");
+    expect(delegate.args as Record<string, unknown>).toHaveProperty("task");
   });
 
   it("delegate tool execute calls executeDelegate with ctx, args, sessionID, abort", async () => {
     executeDelegateMock.mockResolvedValue("[router] accepted");
     const hooks = assembleRuntimeHooks(makeCtx(), makePreset(), true);
-    const delegate = (hooks["tool"] as Record<string, unknown>)["delegate"] as Record<string, unknown>;
+    const delegate = (hooks["tool"] as Record<string, unknown>)["delegate"] as Record<
+      string,
+      unknown
+    >;
     const executeFn = delegate.execute as (...args: unknown[]) => Promise<string>;
     const ctx = makeCtx();
     const args = { task: "say hello", tier: "fast" };

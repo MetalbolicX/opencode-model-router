@@ -62,7 +62,7 @@ export interface TextPart {
 export const isTextPart = (p: unknown): p is TextPart => {
   if (!p || typeof p !== "object") return false;
   const rec = p as Record<string, unknown>;
-  return rec["type"] === "text" && typeof rec["text"] === "string";
+  return rec.type === "text" && typeof rec.text === "string";
 };
 
 /**
@@ -112,14 +112,14 @@ export const asTaskToolArgs = (args: unknown): TaskToolArgs | null => {
   if (!args || typeof args !== "object") return null;
   const rec = args as Record<string, unknown>;
   const out: TaskToolArgs = {};
-  if (typeof rec["subagent_type"] === "string") {
-    out.subagent_type = rec["subagent_type"];
+  if (typeof rec.subagent_type === "string") {
+    out.subagent_type = rec.subagent_type;
   }
-  if (typeof rec["prompt"] === "string") {
-    out.prompt = rec["prompt"];
+  if (typeof rec.prompt === "string") {
+    out.prompt = rec.prompt;
   }
-  if (typeof rec["description"] === "string") {
-    out.description = rec["description"];
+  if (typeof rec.description === "string") {
+    out.description = rec.description;
   }
   return out;
 };
@@ -140,10 +140,10 @@ export interface ChatMessageInput {
 export const asChatMessageInput = (v: unknown): ChatMessageInput | null => {
   if (!v || typeof v !== "object") return null;
   const rec = v as Record<string, unknown>;
-  if (typeof rec["sessionID"] !== "string") return null;
-  const out: ChatMessageInput = { sessionID: rec["sessionID"] };
-  if (typeof rec["agent"] === "string") {
-    out.agent = rec["agent"];
+  if (typeof rec.sessionID !== "string") return null;
+  const out: ChatMessageInput = { sessionID: rec.sessionID };
+  if (typeof rec.agent === "string") {
+    out.agent = rec.agent;
   }
   return out;
 };
@@ -166,10 +166,10 @@ export interface ToolCallInput {
 export const asToolCallInput = (v: unknown): ToolCallInput | null => {
   if (!v || typeof v !== "object") return null;
   const rec = v as Record<string, unknown>;
-  if (typeof rec["sessionID"] !== "string") return null;
-  if (typeof rec["tool"] !== "string") return null;
+  if (typeof rec.sessionID !== "string") return null;
+  if (typeof rec.tool !== "string") return null;
   if (!("args" in rec)) return null;
-  return { sessionID: rec["sessionID"], tool: rec["tool"], args: rec["args"] };
+  return { sessionID: rec.sessionID, tool: rec.tool, args: rec.args };
 };
 
 // ---------------------------------------------------------------------------

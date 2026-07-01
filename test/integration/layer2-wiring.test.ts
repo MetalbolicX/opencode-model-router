@@ -168,6 +168,8 @@ describe("Layer-2 wiring", () => {
   // Option (ii): delegate tool
   // -------------------------------------------------------------------------
 
+  const fakeCtx = { sessionID: "sess_layer2", abort: new AbortController().signal };
+
   describe("Option (ii) delegate tool", () => {
     it("CASE D: returns accepted on deterministic PASS", async () => {
       fs.writeFileSync(path.join(dir, "deliver.txt"), "x");
@@ -175,10 +177,13 @@ describe("Layer-2 wiring", () => {
         makeCtx(dir, "I created deliver.txt as requested.") as any,
       );
 
-      const out: string = await hooks.tool.delegate.execute({
-        task: "Write the file.\n[acceptance]\ncheck: fileExists path=deliver.txt\n[/acceptance]",
-        tier: "fast",
-      });
+      const out: string = await hooks.tool.delegate.execute(
+        {
+          task: "Write the file.\n[acceptance]\ncheck: fileExists path=deliver.txt\n[/acceptance]",
+          tier: "fast",
+        },
+        fakeCtx,
+      );
 
       expect(out).toContain("accepted: deterministic");
     });
@@ -187,10 +192,13 @@ describe("Layer-2 wiring", () => {
       // Fresh temp dir, nope.txt never created.
       const hooks: any = await ModelRouterPlugin(makeCtx(dir, "I totally did it (lying).") as any);
 
-      const out: string = await hooks.tool.delegate.execute({
-        task: "Write the file.\n[acceptance]\ncheck: fileExists path=nope.txt\n[/acceptance]",
-        tier: "fast",
-      });
+      const out: string = await hooks.tool.delegate.execute(
+        {
+          task: "Write the file.\n[acceptance]\ncheck: fileExists path=nope.txt\n[/acceptance]",
+          tier: "fast",
+        },
+        fakeCtx,
+      );
 
       expect(out).toContain("status: unmet");
       expect(out).not.toContain("accepted: ");

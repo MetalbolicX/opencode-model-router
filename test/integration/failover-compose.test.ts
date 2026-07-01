@@ -83,6 +83,8 @@ describe("Phase 3.3 — provider-failover / quality-escalation orthogonality", (
     }
   });
 
+  const fakeCtx = { sessionID: "sess_failover", abort: new AbortController().signal };
+
   // -------------------------------------------------------------------------
   // CASE A: API error folds into exactly one ladder attempt (no double-count)
   // -------------------------------------------------------------------------
@@ -134,11 +136,14 @@ describe("Phase 3.3 — provider-failover / quality-escalation orthogonality", (
     // We decouple them: criteria is neutral; GOOD_RESULT appears only in the
     // producer output, which the grader prompt embeds verbatim.
     const acceptance = "[acceptance]\ncriteria: the task output is satisfactory\n[/acceptance]";
-    const result: string = await hooks.tool.delegate.execute({
-      task: "produce something good",
-      acceptance,
-      tier: "fast",
-    });
+    const result: string = await hooks.tool.delegate.execute(
+      {
+        task: "produce something good",
+        acceptance,
+        tier: "fast",
+      },
+      fakeCtx,
+    );
 
     // Eventually accepted on attempt 2.
     expect(result).toContain("[router ✓ accepted:");
@@ -217,11 +222,14 @@ describe("Phase 3.3 — provider-failover / quality-escalation orthogonality", (
     // check-string, otherwise the grader prompt always matches regardless of
     // what the producer actually returned.
     const acceptance = "[acceptance]\ncriteria: the task output is satisfactory\n[/acceptance]";
-    const result: string = await hooks.tool.delegate.execute({
-      task: "produce something",
-      acceptance,
-      tier: "fast",
-    });
+    const result: string = await hooks.tool.delegate.execute(
+      {
+        task: "produce something",
+        acceptance,
+        tier: "fast",
+      },
+      fakeCtx,
+    );
 
     // Escalation must have engaged: at least 2 producer calls happened.
     expect(producerCalls.length).toBeGreaterThanOrEqual(2);

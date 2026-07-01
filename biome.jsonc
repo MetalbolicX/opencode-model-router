@@ -14,7 +14,8 @@
       "*.js",
       "*.json",
       "*.jsonc",
-      "!scripts/QUICK_REFERENCE.ts"
+      "!scripts/QUICK_REFERENCE.ts",
+      "!tiers.json"
     ]
   },
   "formatter": {

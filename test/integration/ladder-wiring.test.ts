@@ -100,6 +100,8 @@ describe("Layer-3 escalation ladder wiring", () => {
     }
   });
 
+  const fakeCtx = { sessionID: "sess_ladder", abort: new AbortController().signal };
+
   // -------------------------------------------------------------------------
   // CASE A: retry within the same tier, then pass
   // -------------------------------------------------------------------------
@@ -112,11 +114,14 @@ describe("Layer-3 escalation ladder wiring", () => {
       makeCtxWithQueues(dir, producerCalls, graderQueue) as any,
     );
 
-    const result: string = await hooks.tool.delegate.execute({
-      task: "do x",
-      tier: "fast",
-      acceptance,
-    });
+    const result: string = await hooks.tool.delegate.execute(
+      {
+        task: "do x",
+        tier: "fast",
+        acceptance,
+      },
+      fakeCtx,
+    );
 
     expect(result).toContain("[router ✓ accepted:");
     expect(result).not.toContain("status: unmet");
@@ -141,11 +146,14 @@ describe("Layer-3 escalation ladder wiring", () => {
       makeCtxWithQueues(dir, producerCalls, graderQueue) as any,
     );
 
-    const result: string = await hooks.tool.delegate.execute({
-      task: "do y",
-      tier: "fast",
-      acceptance,
-    });
+    const result: string = await hooks.tool.delegate.execute(
+      {
+        task: "do y",
+        tier: "fast",
+        acceptance,
+      },
+      fakeCtx,
+    );
 
     expect(result).toContain("[router ✓ accepted:");
     expect(result).not.toContain("status: unmet");
@@ -166,11 +174,14 @@ describe("Layer-3 escalation ladder wiring", () => {
       makeCtxWithQueues(dir, producerCalls, graderQueue) as any,
     );
 
-    const result: string = await hooks.tool.delegate.execute({
-      task: "do z",
-      tier: "fast",
-      acceptance,
-    });
+    const result: string = await hooks.tool.delegate.execute(
+      {
+        task: "do z",
+        tier: "fast",
+        acceptance,
+      },
+      fakeCtx,
+    );
 
     expect(result).toContain("[router status: unmet]");
     expect(result).toContain("attempt(s)");

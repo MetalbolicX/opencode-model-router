@@ -328,9 +328,7 @@ export const buildReasoningOutput = async (
       lines.push(`- @${name}: variant = '${resolved.variant}'.`);
     }
     if (resolved.options) {
-      lines.push(
-        `- @${name}: options = ${JSON.stringify(resolved.options)}.`,
-      );
+      lines.push(`- @${name}: options = ${JSON.stringify(resolved.options)}.`);
     }
     const note = detectCollapse(cap, arg as ReasoningLevel);
     if (note) {
