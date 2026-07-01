@@ -97,6 +97,7 @@ const makeCtx = (): PluginContext => {
     trajectoryStore: trajectoryStore as any,
     guardStore: guardStore as any,
     changedFileStore: changedFileStore as any,
+    reasoningStore: {} as any,
     graderSessions: new Set<string>(),
     verifyMutex: {} as any,
     seams: { exec: {} as any, fs: {} as any },

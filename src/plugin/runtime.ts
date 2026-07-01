@@ -140,7 +140,11 @@ export const assembleRuntimeHooks = (
     ) =>
       handleCommandBefore(
         ctx,
-        { command: input.command, arguments: input.arguments ?? "" },
+        {
+          command: input.command,
+          arguments: input.arguments ?? "",
+          sessionID: input.sessionID,
+        },
         output,
       ),
 

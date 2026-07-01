@@ -231,6 +231,7 @@ const makeCtx = (opts: {
       clear: () => undefined,
       record: () => undefined,
     } as any,
+    reasoningStore: {} as any,
     graderSessions: new Set<string>(),
     verifyMutex: {} as any,
     seams: { exec: {} as any, fs: {} as any },

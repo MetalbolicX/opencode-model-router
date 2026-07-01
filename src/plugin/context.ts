@@ -30,6 +30,7 @@
 
 import type { PluginInput } from "@opencode-ai/plugin";
 import { createGuardStore } from "../guard/store";
+import { createReasoningStore } from "../reasoning/store";
 import type { Preset, RouterConfig } from "../router/config";
 import { createConfigStore } from "../router/config-store";
 import { getActiveTiers } from "../router/protocol";
@@ -113,6 +114,18 @@ export interface PluginContext {
 
   /** Per-plugin changed-file store (used by verify-dispatch). */
   changedFileStore: ReturnType<typeof createChangedFileStore>;
+
+  /** PR 2 of adaptive-reasoning: per-session override store + per-tier
+   *  baseline snapshots + deferred advisory notes. See
+   *  `src/reasoning/store.ts`. */
+  reasoningStore: ReturnType<typeof createReasoningStore>;
+
+  /** The live `opencodeConfig` reference, captured at `handleConfig` time.
+   *  Runtime hooks (tool.execute.before/after) use this to apply / revert
+   *  reasoning patches on the targeted tier agent without rebuilding every
+   *  tier. Only the agent map is exposed — the rest of the OpenCode config
+   *  surface is out of scope for the reasoning feature. */
+  opencodeConfig?: { agent?: Record<string, Record<string, unknown>> };
 
   /** Set of currently-open grader session IDs (used to skip grader sessions
    *  in the chat.params temperature override). */
@@ -203,6 +216,7 @@ export const createPluginContext = async (plugin: PluginInput): Promise<PluginCo
     trajectoryStore: createTrajectoryStore(),
     guardStore: createGuardStore(),
     changedFileStore: createChangedFileStore(),
+    reasoningStore: createReasoningStore(),
     graderSessions: new Set<string>(),
     verifyMutex: createMutexRegistry(),
     seams: {

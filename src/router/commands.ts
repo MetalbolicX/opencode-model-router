@@ -1,8 +1,18 @@
 import type { PluginContext } from "../plugin/context";
+import type { ReasoningCapability, ReasoningLevel } from "../reasoning/capability.js";
+import { inferCapability } from "../reasoning/capability.js";
+import { translateLevel } from "../reasoning/translate.js";
 import type { RouterConfig } from "./config";
 import { resolvePresetName, saveActiveMode, saveActivePreset, saveEnforcementMode } from "./config";
 import { resolveEnforcementMode } from "./enforcement";
 import { getActiveTiers } from "./protocol";
+
+const REASONING_LEVELS: ReadonlySet<ReasoningLevel> = new Set([
+  "minimal",
+  "normal",
+  "elevated",
+  "max",
+]);
 
 // ---------------------------------------------------------------------------
 // /router command output
@@ -167,6 +177,178 @@ export const buildPresetOutput = async (cfg: RouterConfig, args: string): Promis
 };
 
 // ---------------------------------------------------------------------------
+// /reasoning command output (PR 2 of adaptive-reasoning).
+//
+// Validates the argument against the 4 normalized levels (or `off`), sets /
+// clears the per-session override on `ctx.reasoningStore`, and returns a
+// confirmation that names the targeted tier's capability and whether the
+// level actually applies or collapses onto a coarser rung.
+//
+// Honors `reasoningPolicy.surfaceLimits`: when true, emits an advisory note
+// describing any collapse (e.g. `normal` and `elevated` both mapping to
+// `medium` on a 3-level discrete ladder — documented quirk of the
+// `Math.round(rank/3 * (len-1))` formula in PR 1). Defaults to silent no-op.
+// ---------------------------------------------------------------------------
+
+/**
+ * Describe a tier's capability in plain English for the command output.
+ * Compact form: the tier name + the kind + a one-line hint about what it
+ * can satisfy.
+ */
+const describeCapability = (tierName: string, cap: ReasoningCapability): string => {
+  switch (cap.kind) {
+    case "none":
+      return `@${tierName}: no reasoning control (the tier is left as-is).`;
+    case "binary":
+      return `@${tierName}: binary variant (elevated: ${cap.elevated}${cap.baseline ? `, baseline: ${cap.baseline}` : ""}).`;
+    case "discrete": {
+      const channel = cap.field === "variant" ? "variant" : "reasoning_effort";
+      return `@${tierName}: discrete ${channel} ladder [${cap.levels.join(" < ")}].`;
+    }
+    case "budgeted":
+      return `@${tierName}: budgeted (thinking tokens per level: ${Object.entries(cap.recommended)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(", ")}).`;
+  }
+};
+
+/**
+ * Detect when a discrete-ladder translation collapses two requested levels
+ * onto the same rung (the documented `Math.round(rank/3 * (len-1))` quirk
+ * for 3-level ladders: normal + elevated both map to index 1 = medium).
+ *
+ * Returns a one-line advisory note when a collapse happened, or `undefined`
+ * when every requested level maps to a distinct rung.
+ */
+const detectCollapse = (cap: ReasoningCapability, level: ReasoningLevel): string | undefined => {
+  if (cap.kind !== "discrete") return undefined;
+  // Compare the resolved patch for `level` against the resolved patch for
+  // the level one rank below. If they're equal, the requested level has
+  // collapsed onto a coarser rung.
+  const RANK: Record<ReasoningLevel, number> = { minimal: 0, normal: 1, elevated: 2, max: 3 };
+  const rank = RANK[level];
+  if (rank <= 0) return undefined;
+  const lower = (Object.keys(RANK) as ReasoningLevel[]).find((k) => RANK[k] === rank - 1);
+  if (!lower) return undefined;
+  const here = translateLevel(cap, level);
+  const below = translateLevel(cap, lower);
+  if (!here || !below) return undefined;
+  // Compare the patch payload — same channel output means collapse.
+  if (here.variant !== undefined && here.variant === below.variant) {
+    return `Note: '${level}' collapses to '${here.variant}' (same as '${lower}') on this tier's ladder — surface the limit by enabling reasoningPolicy.surfaceLimits.`;
+  }
+  if (here.options && below.options) {
+    if (JSON.stringify(here.options) === JSON.stringify(below.options)) {
+      const key = Object.keys(here.options)[0] ?? "";
+      return `Note: '${level}' collapses onto '${lower}' for this tier (${key}=${here.options[key]}).`;
+    }
+  }
+  return undefined;
+};
+
+export const buildReasoningOutput = async (
+  cfg: RouterConfig,
+  args: string,
+  ctx: PluginContext,
+  sessionID: string,
+): Promise<string> => {
+  const surfaceLimits = cfg.reasoningPolicy?.surfaceLimits === true;
+  const policyMode = cfg.reasoningPolicy?.mode ?? "static";
+
+  const arg = (args ?? "").trim().toLowerCase();
+
+  // Show help when no args — describe every active tier's capability.
+  if (!arg) {
+    const tiers = getActiveTiers(cfg);
+    const lines: string[] = [
+      `# Reasoning Overrides`,
+      `Policy mode: **${policyMode}** (surfaceLimits: ${surfaceLimits ? "on" : "off"})`,
+      "",
+    ];
+    for (const [name, tier] of Object.entries(tiers)) {
+      const cap = tier.capability ?? inferCapability(tier);
+      lines.push(describeCapability(name, cap));
+    }
+    lines.push(
+      "",
+      "Set with: `/reasoning minimal|normal|elevated|max`. Clear with `/reasoning off`.",
+      "Applies to the next `task` dispatch in this session only.",
+    );
+    return lines.join("\n");
+  }
+
+  if (arg === "off") {
+    if (sessionID) ctx.reasoningStore.clearOverride(sessionID);
+    return [
+      "Reasoning override cleared.",
+      "",
+      "Next task dispatches in this session will use the tier's baseline reasoning.",
+    ].join("\n");
+  }
+
+  if (!REASONING_LEVELS.has(arg as ReasoningLevel)) {
+    return `Unknown level: "${arg}". Use one of: minimal, normal, elevated, max (or "off" to clear).`;
+  }
+
+  if (policyMode === "static") {
+    return [
+      `Requested level: **${arg}**`,
+      "",
+      `Reasoning policy mode is **static** — the override will NOT be applied at task dispatch.`,
+      "Set `reasoningPolicy.mode` to `manual` in `tiers.json` to enable per-session overrides.",
+    ].join("\n");
+  }
+
+  if (sessionID) ctx.reasoningStore.setOverride(sessionID, arg as ReasoningLevel);
+
+  // Per-tier acknowledgement: which tiers can actually satisfy the level,
+  // which collapse, and which can't (none capability → silent no-op unless
+  // surfaceLimits is enabled).
+  const tiers = getActiveTiers(cfg);
+  const lines: string[] = [
+    `Reasoning override set to **${arg}** for this session.`,
+    "",
+    "Per-tier behaviour:",
+  ];
+  let anyCollapse = false;
+  for (const [name, tier] of Object.entries(tiers)) {
+    const cap = tier.capability ?? inferCapability(tier);
+    if (cap.kind === "none") {
+      if (surfaceLimits) lines.push(`- @${name}: unsupported (no reasoning control).`);
+      continue;
+    }
+    const resolved = translateLevel(cap, arg as ReasoningLevel);
+    if (!resolved) {
+      if (surfaceLimits) {
+        lines.push(`- @${name}: level '${arg}' is a no-op for this tier's capability.`);
+      }
+      continue;
+    }
+    if (resolved.variant !== undefined) {
+      lines.push(`- @${name}: variant = '${resolved.variant}'.`);
+    }
+    if (resolved.options) {
+      lines.push(
+        `- @${name}: options = ${JSON.stringify(resolved.options)}.`,
+      );
+    }
+    const note = detectCollapse(cap, arg as ReasoningLevel);
+    if (note) {
+      anyCollapse = true;
+      if (surfaceLimits) lines.push(`  ${note}`);
+    }
+  }
+  if (anyCollapse && !surfaceLimits) {
+    lines.push(
+      "",
+      "(One or more tiers collapse this level onto a coarser rung. Enable `reasoningPolicy.surfaceLimits` to see which.)",
+    );
+  }
+  lines.push("", "Takes effect on the next `task` dispatch in this session.");
+  return lines.join("\n");
+};
+
+// ---------------------------------------------------------------------------
 // Register router commands on the opencode config object
 // ---------------------------------------------------------------------------
 
@@ -237,6 +419,11 @@ export const registerRouterCommands = (opencodeConfig: {
     template: "$ARGUMENTS",
     description: "Model-router controls (e.g., /router enforce off|advisory|enforced)",
   };
+  opencodeConfig.command["reasoning"] = {
+    template: "$ARGUMENTS",
+    description:
+      "Set reasoning level: /reasoning minimal|normal|elevated|max (set) | /reasoning off (clear)",
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -255,7 +442,7 @@ export const registerRouterCommands = (opencodeConfig: {
  */
 export const handleCommandBefore = async (
   ctx: PluginContext,
-  input: { command: string; arguments?: string },
+  input: { command: string; arguments?: string; sessionID?: string },
   // The SDK's `command.execute.before` output is `{ parts: Part[] }` where
   // `Part` is a discriminated union of text/reasoning/file/tool/etc. We only
   // push text parts, so a structural supertype is sufficient.
@@ -309,6 +496,14 @@ export const handleCommandBefore = async (
     output.parts.push({
       type: "text" as const,
       text: await buildRouterOutput(cfg, input.arguments ?? ""),
+    });
+  }
+
+  if (input.command === "reasoning") {
+    const cfg = await ctx.getFreshConfig();
+    output.parts.push({
+      type: "text" as const,
+      text: await buildReasoningOutput(cfg, input.arguments ?? "", ctx, input.sessionID ?? ""),
     });
   }
 };

@@ -131,6 +131,7 @@ const makeCtx = (opts: {
       clear: opts.changedFileStore?.clear ?? (() => undefined),
       record: opts.changedFileStore?.record ?? (() => undefined),
     } as any,
+    reasoningStore: {} as any,
     graderSessions: new Set<string>(),
     verifyMutex: { runExclusive: async (_k: string, fn: () => Promise<any>) => fn() } as any,
     seams: {

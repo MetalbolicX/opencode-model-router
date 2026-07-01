@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PluginContext } from "../../src/plugin/context";
+import { createReasoningStore } from "../../src/reasoning/store";
 import {
   handleChatMessage,
   handleChatParams,
@@ -214,6 +215,7 @@ const makeHarness = (opts?: {
     trajectoryStore: trajectoryStore as any,
     guardStore: guardStore as any,
     changedFileStore: changedFileStore as any,
+    reasoningStore: createReasoningStore(),
     graderSessions: harness.graderSessions,
     verifyMutex: {} as any,
     seams: { exec: {} as any, fs: {} as any },

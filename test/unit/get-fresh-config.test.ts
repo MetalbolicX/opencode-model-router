@@ -171,6 +171,7 @@ describe("PluginContext.getFreshConfig", () => {
       trajectoryStore: {} as any,
       guardStore: {} as any,
       changedFileStore: {} as any,
+      reasoningStore: {} as any,
       graderSessions: new Set<string>(),
       verifyMutex: {} as any,
       seams: { exec: {} as any, fs: {} as any },

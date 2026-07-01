@@ -2,11 +2,15 @@ import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { PluginContext } from "../../src/plugin/context";
+import { createReasoningStore } from "../../src/reasoning/store";
 import {
   buildBudgetOutput,
   buildPresetOutput,
+  buildReasoningOutput,
   buildRouterOutput,
   buildTiersOutput,
+  handleCommandBefore,
 } from "../../src/router/commands";
 import type { Preset, RouterConfig, TierConfig } from "../../src/router/config";
 
@@ -294,5 +298,171 @@ describe("buildPresetOutput", () => {
     const before = cfg.activePreset;
     await buildPresetOutput(cfg, "openai");
     expect(cfg.activePreset).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildReasoningOutput (PR 2 of adaptive-reasoning)
+// ---------------------------------------------------------------------------
+
+const makeReasoningCtx = (cfg: RouterConfig, sid = "sess-test"): PluginContext =>
+  ({
+    plugin: { directory: tmpHome, client: {} as any } as any,
+    initialConfig: cfg,
+    activeTiersAtLoad: cfg.presets[cfg.activePreset]!,
+    getConfig: async () => cfg,
+    refreshConfig: async () => cfg,
+    getFreshConfig: async () => cfg,
+    dispose: async () => {},
+    state: { bypassed: false, cleanupTasks: [], shutdownStarted: false },
+    sessionStore: {} as any,
+    trajectoryStore: {} as any,
+    guardStore: {} as any,
+    changedFileStore: {} as any,
+    reasoningStore: createReasoningStore(),
+    graderSessions: new Set<string>(),
+    verifyMutex: {} as any,
+    seams: { exec: {} as any, fs: {} as any },
+  }) as PluginContext;
+
+describe("buildReasoningOutput", () => {
+  it("describes every active tier when called with no args", async () => {
+    const cfg = makeConfig({
+      reasoningPolicy: { mode: "manual", surfaceLimits: false },
+    });
+    const out = await buildReasoningOutput(cfg, "", makeReasoningCtx(cfg), "sess-1");
+    expect(out).toContain("# Reasoning Overrides");
+    expect(out).toContain("Policy mode: **manual**");
+    expect(out).toContain("surfaceLimits: off");
+    // Every tier in the anthropic preset (fast + medium) is listed.
+    expect(out).toContain("@fast");
+    expect(out).toContain("@medium");
+  });
+
+  it("/reasoning off clears any existing override", async () => {
+    const cfg = makeConfig({
+      reasoningPolicy: { mode: "manual" },
+    });
+    const ctx = makeReasoningCtx(cfg);
+    ctx.reasoningStore.setOverride("sess-1", "elevated");
+    expect(ctx.reasoningStore.getOverride("sess-1")).toBe("elevated");
+    const out = await buildReasoningOutput(cfg, "off", ctx, "sess-1");
+    expect(out).toContain("Reasoning override cleared");
+    expect(ctx.reasoningStore.getOverride("sess-1")).toBeUndefined();
+  });
+
+  it("invalid levels are rejected with a helpful usage message", async () => {
+    const cfg = makeConfig({
+      reasoningPolicy: { mode: "manual" },
+    });
+    const out = await buildReasoningOutput(cfg, "ultra", makeReasoningCtx(cfg), "sess-1");
+    expect(out).toContain("Unknown level");
+    expect(out).toContain("ultra");
+    expect(out).toContain("minimal");
+    expect(out).toContain("max");
+  });
+
+  it("static mode warns that the override will NOT be applied", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "static" } });
+    const ctx = makeReasoningCtx(cfg);
+    const out = await buildReasoningOutput(cfg, "elevated", ctx, "sess-1");
+    expect(out).toContain("Requested level: **elevated**");
+    expect(out).toContain("static");
+    expect(out).toContain("will NOT be applied");
+    // Static mode must NOT touch the store — the regression guard.
+    expect(ctx.reasoningStore.getOverride("sess-1")).toBeUndefined();
+  });
+
+  it("manual mode writes the override onto the store", async () => {
+    const cfg = makeConfig({
+      reasoningPolicy: { mode: "manual" },
+    });
+    const ctx = makeReasoningCtx(cfg);
+    await buildReasoningOutput(cfg, "max", ctx, "sess-1");
+    expect(ctx.reasoningStore.getOverride("sess-1")).toBe("max");
+  });
+
+  it("two sessions are isolated — one session's override does not affect another", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
+    const ctx = makeReasoningCtx(cfg);
+    await buildReasoningOutput(cfg, "max", ctx, "sess-A");
+    await buildReasoningOutput(cfg, "minimal", ctx, "sess-B");
+    expect(ctx.reasoningStore.getOverride("sess-A")).toBe("max");
+    expect(ctx.reasoningStore.getOverride("sess-B")).toBe("minimal");
+    await buildReasoningOutput(cfg, "off", ctx, "sess-A");
+    expect(ctx.reasoningStore.getOverride("sess-A")).toBeUndefined();
+    expect(ctx.reasoningStore.getOverride("sess-B")).toBe("minimal");
+  });
+
+  it("surfaceLimits:true emits a per-tier patch breakdown (binary capability)", async () => {
+    const cfg = makeConfig({
+      reasoningPolicy: { mode: "manual", surfaceLimits: true },
+    });
+    cfg.presets.anthropic.medium = {
+      model: "minimax/MiniMax-M3",
+      description: "M",
+      steps: 50,
+      whenToUse: ["impl"],
+      variant: "thinking",
+    } as TierConfig;
+    const out = await buildReasoningOutput(cfg, "elevated", makeReasoningCtx(cfg), "sess-1");
+    expect(out).toContain("Per-tier behaviour:");
+    expect(out).toContain("@medium");
+    expect(out).toContain("variant = 'thinking'");
+  });
+
+  it("surfaceLimits:false keeps the per-tier breakdown but skips collapse notes", async () => {
+    const cfg = makeConfig({
+      reasoningPolicy: { mode: "manual", surfaceLimits: false },
+    });
+    cfg.presets.anthropic.fast = {
+      model: "openai/gpt-5.4-mini-fast",
+      description: "Mini",
+      steps: 30,
+      whenToUse: ["recon"],
+      reasoning: { effort: "high" },
+    } as TierConfig;
+    const out = await buildReasoningOutput(cfg, "elevated", makeReasoningCtx(cfg), "sess-1");
+    expect(out).toContain("Per-tier behaviour:");
+    // Per-tier line must still mention reasoning_effort (this tier can satisfy).
+    expect(out).toContain("reasoning_effort");
+  });
+
+  it("handles an empty sessionID gracefully (does not throw, does not write)", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
+    const ctx = makeReasoningCtx(cfg, "");
+    const out = await buildReasoningOutput(cfg, "max", ctx, "");
+    // No throw. The override write is silently skipped because sessionID is "".
+    expect(out).toContain("Reasoning override set to **max**");
+    expect(ctx.reasoningStore.getOverride("")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleCommandBefore — /reasoning branch (PR 2)
+// ---------------------------------------------------------------------------
+
+describe("handleCommandBefore — /reasoning branch", () => {
+  it("pushes a text part for the /reasoning command", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
+    const ctx = makeReasoningCtx(cfg);
+    const output: { parts: any[] } = { parts: [] };
+    await handleCommandBefore(
+      ctx,
+      { command: "reasoning", arguments: "elevated", sessionID: "sess-cmd" },
+      output,
+    );
+    expect(output.parts).toHaveLength(1);
+    expect(output.parts[0].type).toBe("text");
+    expect(output.parts[0].text).toContain("Reasoning override set to **elevated**");
+    expect(ctx.reasoningStore.getOverride("sess-cmd")).toBe("elevated");
+  });
+
+  it("/reasoning with no args shows the capability summary", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
+    const ctx = makeReasoningCtx(cfg);
+    const output: { parts: any[] } = { parts: [] };
+    await handleCommandBefore(ctx, { command: "reasoning", sessionID: "sess-cmd" }, output);
+    expect(output.parts[0].text).toContain("# Reasoning Overrides");
   });
 });
