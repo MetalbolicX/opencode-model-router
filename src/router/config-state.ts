@@ -169,11 +169,18 @@ export const saveEnforcementMode = async (mode: "off" | "advisory" | "enforced")
  * config because the type union itself is the contract; an unknown
  * value cannot reach this function (callers parse the literal set).
  *
+ * `mode` accepts the three policy modes the resolver understands
+ * (`"static" | "manual" | "adaptive"`). The set is narrower than
+ * `ReasoningPolicyConfig["mode"]`'s declared union would allow once
+ * shipped; widening here is the single source of truth for what the
+ * overlay accepts — `config-loader.ts` mirrors the same literal set
+ * via `REASONING_PERSISTED_MODES`.
+ *
  * The overlay is consumed by `applyStateOverlay()` in `config-loader.ts`
  * and overrides `cfg.reasoningPolicy.mode` on the next config refresh.
  * Mode switching survives restarts via the persisted state file.
  */
-export const saveReasoningMode = async (mode: "static" | "manual"): Promise<void> => {
+export const saveReasoningMode = async (mode: "static" | "manual" | "adaptive"): Promise<void> => {
   await writeState({ reasoningMode: mode });
 };
 

@@ -16,13 +16,20 @@
 //   - `manual`   → resolve `sessionOverride ?? policy.defaultLevel`, translate
 //                  through the tier's capability. If both are undefined → null
 //                  (no-op).
-//   - `adaptive` → STUB. Returns null. A future plan will wire an adaptive
-//                  engine that picks the level based on task class / risk
-//                  signals. Until then, adaptive mode behaves identically to
-//                  no override.
+//   - `adaptive` → consult `selectAdaptiveLevel` (in `./adaptive.ts`) for a
+//                  level picked from real task signals. Precedence, highest
+//                  first:
+//                      1. explicit `sessionOverride` (always wins)
+//                      2. `selectAdaptiveLevel(signals, policy)` result
+//                      3. `policy.defaultLevel` as a safety net
+//                      4. null (no patch — agent def left at baseline)
+//                  Every resolved level is passed through `translateLevel`
+//                  so capability gating still applies; adaptive only picks
+//                  the normalized level, not the provider-specific patch.
 // ---------------------------------------------------------------------------
 
 import type { ReasoningPolicyConfig, TierConfig } from "../router/config.types.js";
+import { type AdaptiveSignals, selectAdaptiveLevel } from "./adaptive.js";
 import { inferCapability, type ReasoningLevel } from "./capability.js";
 import { type ResolvedReasoning, translateLevel } from "./translate.js";
 
@@ -31,13 +38,23 @@ import { type ResolvedReasoning, translateLevel } from "./translate.js";
  *
  * The `sessionOverride` is sourced from `reasoningStore.get(sessionID)`. The
  * hook layer decides whether to thread it (manual mode reads it; static mode
- * ignores it; adaptive mode ignores it for now).
+ * ignores it; adaptive mode reads it FIRST so a per-session override always
+ * wins over selector output — operators need certainty when they set it
+ * manually via `/model-router-reasoning elevated`).
+ *
+ * The `signals` argument is required — it feeds `selectAdaptiveLevel` in
+ * adaptive mode. Hooks that haven't yet threaded real task text (today:
+ * `src/plugin/hooks.ts` — wired in a later PR of Plan 015) pass an empty
+ * `{ prompt: "", description: "", tierName, isTrivial }` placeholder; the
+ * selector's keyword step is a substring match against an empty haystack so
+ * non-trivial calls fall through to `tierDefaults` / `defaultLevel` safely.
  *
  * Returns `null` when:
- *   - the policy mode is `static` or `adaptive` (no override applied), OR
- *   - the resolved level is missing AND no `defaultLevel` is configured, OR
- *   - the tier's capability cannot satisfy the level (`none`, or `binary` with
- *     no baseline for a low-rank level — see `translateLevel`).
+ *   - the policy mode is `static`, OR
+ *   - no level resolves (no override + no adaptive block + no defaultLevel),
+ *     OR
+ *   - the tier's capability cannot satisfy the level (`none`, or `binary`
+ *     with no baseline for a low-rank level — see `translateLevel`).
  *
  * `surfaceLimits` is intentionally NOT consulted here — surfacing is a
  * presentation concern owned by the `/reasoning` command handler and the
@@ -48,15 +65,39 @@ import { type ResolvedReasoning, translateLevel } from "./translate.js";
 export const resolveReasoningOverride = (
   tier: TierConfig,
   policy: ReasoningPolicyConfig | undefined,
-  sessionOverride?: ReasoningLevel,
+  sessionOverride: ReasoningLevel | undefined,
+  signals: AdaptiveSignals,
 ): ResolvedReasoning => {
   const mode = policy?.mode ?? "static";
-  // Primary regression guard: static mode is a hard no-op, regardless of any
-  // session override. This keeps `pnpm test -- router-agents` identical to
-  // pre-Plan-010 behaviour when no `reasoningPolicy` is configured.
-  if (mode !== "manual") return null;
 
-  const level = sessionOverride ?? policy?.defaultLevel;
+  // Primary regression guard: static mode is a hard no-op, regardless of any
+  // session override. This keeps the agent def exactly as `registerTierAgents`
+  // produced it when `reasoningPolicy` is absent or `mode === "static"`.
+  if (mode === "static") return null;
+
+  // Manual mode: pre-Plan-015 semantics, unchanged. A per-session override
+  // wins over `policy.defaultLevel`; either way we translate through the
+  // tier's capability.
+  if (mode === "manual") {
+    const level = sessionOverride ?? policy?.defaultLevel;
+    if (!level) return null;
+    const cap = tier.capability ?? inferCapability(tier);
+    return translateLevel(cap, level);
+  }
+
+  // mode === "adaptive"
+  // Precedence (highest first; mirroring the file header):
+  //   1. explicit `sessionOverride` (always wins)
+  //   2. `selectAdaptiveLevel(signals, policy)` result
+  //   3. `policy.defaultLevel` as a safety net
+  //   4. null (no patch — agent def left at baseline)
+  if (sessionOverride) {
+    const cap = tier.capability ?? inferCapability(tier);
+    return translateLevel(cap, sessionOverride);
+  }
+
+  const decision = selectAdaptiveLevel(signals, policy);
+  const level = decision.level ?? policy?.defaultLevel;
   if (!level) return null;
 
   const cap = tier.capability ?? inferCapability(tier);

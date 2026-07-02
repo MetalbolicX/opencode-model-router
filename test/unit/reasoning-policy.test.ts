@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { AdaptiveSignals } from "../../src/reasoning/adaptive";
 import type { ReasoningCapability, ReasoningLevel } from "../../src/reasoning/capability";
 import { resolveReasoningOverride } from "../../src/reasoning/policy";
 import { createReasoningStore } from "../../src/reasoning/store";
@@ -15,6 +16,27 @@ const baseTier = (overrides: Partial<TierConfig> = {}): TierConfig => ({
   ...overrides,
 });
 
+// Placeholder signals for tests that exercise static / manual behaviour
+// through `resolveReasoningOverride`. Required by the new 4-param signature
+// (Plan 015 PR #2 — adaptive selector); never consulted by static or manual
+// mode branches, so the empty values cannot influence the outcome.
+const emptySignals: AdaptiveSignals = {
+  prompt: "",
+  description: "",
+  tierName: "",
+  isTrivial: false,
+};
+
+// Adaptive-mode test helper — `signals` may need a real `tierName` to test
+// `tierDefaults` lookup. Centralised so future adaptive tests stay DRY.
+const adaptiveSignals = (partial: Partial<AdaptiveSignals> = {}): AdaptiveSignals => ({
+  prompt: "",
+  description: "",
+  tierName: "",
+  isTrivial: false,
+  ...partial,
+});
+
 // ---------------------------------------------------------------------------
 // resolveReasoningOverride — static mode is the primary regression guard
 // ---------------------------------------------------------------------------
@@ -26,22 +48,27 @@ describe("resolveReasoningOverride — static mode (regression guard)", () => {
   it("returns null for every level when policy mode is static", () => {
     const levels: ReasoningLevel[] = ["minimal", "normal", "elevated", "max"];
     for (const level of levels) {
-      expect(resolveReasoningOverride(tier, staticPolicy, level)).toBeNull();
+      expect(resolveReasoningOverride(tier, staticPolicy, level, emptySignals)).toBeNull();
     }
   });
 
   it("returns null even when a session override is set (static ignores overrides)", () => {
-    expect(resolveReasoningOverride(tier, staticPolicy, "elevated")).toBeNull();
-    expect(resolveReasoningOverride(tier, staticPolicy, "max")).toBeNull();
+    expect(resolveReasoningOverride(tier, staticPolicy, "elevated", emptySignals)).toBeNull();
+    expect(resolveReasoningOverride(tier, staticPolicy, "max", emptySignals)).toBeNull();
   });
 
   it("returns null when reasoningPolicy is absent (default = static)", () => {
-    expect(resolveReasoningOverride(tier, undefined, "elevated")).toBeNull();
+    expect(resolveReasoningOverride(tier, undefined, "elevated", emptySignals)).toBeNull();
   });
 
   it("static with surfaceLimits:true still returns null (limits are not applied in static mode)", () => {
     expect(
-      resolveReasoningOverride(tier, { mode: "static", surfaceLimits: true }, "elevated"),
+      resolveReasoningOverride(
+        tier,
+        { mode: "static", surfaceLimits: true },
+        "elevated",
+        emptySignals,
+      ),
     ).toBeNull();
   });
 });
@@ -59,46 +86,48 @@ describe("resolveReasoningOverride — manual mode applies override", () => {
   const manualPolicy: ReasoningPolicyConfig = { mode: "manual" };
 
   it("translates the session override for a discrete / reasoning.effort tier", () => {
-    expect(resolveReasoningOverride(discreteTier, manualPolicy, "max")).toEqual({
+    expect(resolveReasoningOverride(discreteTier, manualPolicy, "max", emptySignals)).toEqual({
       options: { reasoning_effort: "high" },
     });
-    expect(resolveReasoningOverride(discreteTier, manualPolicy, "minimal")).toEqual({
+    expect(resolveReasoningOverride(discreteTier, manualPolicy, "minimal", emptySignals)).toEqual({
       options: { reasoning_effort: "low" },
     });
   });
 
   it("translates the session override for a binary tier", () => {
-    expect(resolveReasoningOverride(binaryTier, manualPolicy, "elevated")).toEqual({
+    expect(resolveReasoningOverride(binaryTier, manualPolicy, "elevated", emptySignals)).toEqual({
       variant: "thinking",
     });
   });
 
   it("translates the session override for a budgeted tier", () => {
-    expect(resolveReasoningOverride(budgetedTier, manualPolicy, "max")).toEqual({
+    expect(resolveReasoningOverride(budgetedTier, manualPolicy, "max", emptySignals)).toEqual({
       options: { budget_tokens: 16000 },
     });
   });
 
   it("manual mode with no override falls back to defaultLevel", () => {
     const policy: ReasoningPolicyConfig = { mode: "manual", defaultLevel: "elevated" };
-    expect(resolveReasoningOverride(binaryTier, policy)).toEqual({ variant: "thinking" });
+    expect(resolveReasoningOverride(binaryTier, policy, undefined, emptySignals)).toEqual({
+      variant: "thinking",
+    });
   });
 
   it("manual mode with no override AND no defaultLevel returns null", () => {
-    expect(resolveReasoningOverride(binaryTier, manualPolicy)).toBeNull();
+    expect(resolveReasoningOverride(binaryTier, manualPolicy, undefined, emptySignals)).toBeNull();
   });
 
   it("session override wins over defaultLevel", () => {
     const policy: ReasoningPolicyConfig = { mode: "manual", defaultLevel: "minimal" };
-    expect(resolveReasoningOverride(binaryTier, policy, "max")).toEqual({
+    expect(resolveReasoningOverride(binaryTier, policy, "max", emptySignals)).toEqual({
       variant: "thinking",
     });
   });
 
   it("never mutates a none-capability tier", () => {
     const noneTier = baseTier(); // no reasoning fields
-    expect(resolveReasoningOverride(noneTier, manualPolicy, "elevated")).toBeNull();
-    expect(resolveReasoningOverride(noneTier, manualPolicy, "max")).toBeNull();
+    expect(resolveReasoningOverride(noneTier, manualPolicy, "elevated", emptySignals)).toBeNull();
+    expect(resolveReasoningOverride(noneTier, manualPolicy, "max", emptySignals)).toBeNull();
   });
 
   it("explicit capability declaration wins over inference", () => {
@@ -110,25 +139,142 @@ describe("resolveReasoningOverride — manual mode applies override", () => {
     const tierWithCap = baseTier({ capability: cap, variant: "thinking" });
     // Capability says elevated="max" — overrides the inference path that
     // would have used variant="thinking".
-    expect(resolveReasoningOverride(tierWithCap, manualPolicy, "elevated")).toEqual({
+    expect(resolveReasoningOverride(tierWithCap, manualPolicy, "elevated", emptySignals)).toEqual({
       variant: "max",
     });
   });
 });
 
 // ---------------------------------------------------------------------------
-// resolveReasoningOverride — adaptive mode is a stub (returns null)
+// resolveReasoningOverride — adaptive mode delegates to selectAdaptiveLevel
+//
+// Precedence (highest first):
+//   1. explicit session override always wins
+//   2. selector result (`selectAdaptiveLevel`)
+//   3. `policy.defaultLevel` safety net
+//   4. null
+//
+// These tests assert precedence + fallback by translating the chosen level
+// through a discrete-tier capability and reading back the resolved patch.
 // ---------------------------------------------------------------------------
 
-describe("resolveReasoningOverride — adaptive mode (stub)", () => {
-  const tier = baseTier({ variant: "thinking" });
+describe("resolveReasoningOverride — adaptive mode applies the selector", () => {
+  const discreteTier = baseTier({
+    reasoning: { effort: "high" }, // -> discrete / 3-level ladder
+  });
 
-  it("returns null for every level under adaptive mode", () => {
+  it("explicit session override wins over the selector (translates through capability)", () => {
+    const policy: ReasoningPolicyConfig = {
+      mode: "adaptive",
+      adaptive: { defaultLevel: "minimal" },
+    };
+    expect(resolveReasoningOverride(discreteTier, policy, "max", emptySignals)).toEqual({
+      options: { reasoning_effort: "high" },
+    });
+  });
+
+  it("no override + no adaptive config block → null (deterministic by design, not by stub)", () => {
     const policy: ReasoningPolicyConfig = { mode: "adaptive" };
-    const levels: ReasoningLevel[] = ["minimal", "normal", "elevated", "max"];
-    for (const level of levels) {
-      expect(resolveReasoningOverride(tier, policy, level)).toBeNull();
-    }
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, emptySignals)).toBeNull();
+  });
+
+  it("no override + adaptive block present + selector returns null + no defaultLevel → null", () => {
+    const policy: ReasoningPolicyConfig = { mode: "adaptive", adaptive: {} };
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, emptySignals)).toBeNull();
+  });
+
+  it("keyword match in `prompt` → translates the rule's level", () => {
+    const policy: ReasoningPolicyConfig = {
+      mode: "adaptive",
+      adaptive: { keywordRules: [{ keywords: ["refactor"], level: "max" }] },
+    };
+    const signals = adaptiveSignals({ prompt: "please refactor the auth module" });
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, signals)).toEqual({
+      options: { reasoning_effort: "high" },
+    });
+  });
+
+  it("keyword match in `description` (not in `prompt`) still fires", () => {
+    const policy: ReasoningPolicyConfig = {
+      mode: "adaptive",
+      adaptive: { keywordRules: [{ keywords: ["diagnose"], level: "max" }] },
+    };
+    const signals = adaptiveSignals({ description: "diagnose the routing bug" });
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, signals)).toEqual({
+      options: { reasoning_effort: "high" },
+    });
+  });
+
+  it("trivial task + trivialLevel=null → null (opt-out)", () => {
+    const policy: ReasoningPolicyConfig = {
+      mode: "adaptive",
+      adaptive: { trivialLevel: null, defaultLevel: "normal" },
+    };
+    const signals = adaptiveSignals({ isTrivial: true });
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, signals)).toBeNull();
+  });
+
+  it("trivial task + trivialLevel set → translates that level (overrides defaultLevel)", () => {
+    const policy: ReasoningPolicyConfig = {
+      mode: "adaptive",
+      adaptive: { trivialLevel: "max", defaultLevel: "minimal" },
+    };
+    const signals = adaptiveSignals({ isTrivial: true });
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, signals)).toEqual({
+      options: { reasoning_effort: "high" },
+    });
+  });
+
+  it("non-trivial + no keyword match + defaultLevel set → translates defaultLevel", () => {
+    const policy: ReasoningPolicyConfig = {
+      mode: "adaptive",
+      adaptive: { defaultLevel: "max" },
+    };
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, emptySignals)).toEqual({
+      options: { reasoning_effort: "high" },
+    });
+  });
+
+  it("tierDefaults[tierName] wins over defaultLevel when both are set", () => {
+    const policy: ReasoningPolicyConfig = {
+      mode: "adaptive",
+      adaptive: {
+        defaultLevel: "minimal",
+        tierDefaults: { fast: "max" },
+      },
+    };
+    const signals = adaptiveSignals({ tierName: "fast" });
+    // max on discrete tier → reasoning_effort: "high" (NOT minimal's "low")
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, signals)).toEqual({
+      options: { reasoning_effort: "high" },
+    });
+  });
+
+  it("tierDefaults for a different tier is ignored — falls through to defaultLevel", () => {
+    const policy: ReasoningPolicyConfig = {
+      mode: "adaptive",
+      adaptive: {
+        defaultLevel: "max",
+        tierDefaults: { heavy: "minimal" },
+      },
+    };
+    const signals = adaptiveSignals({ tierName: "fast" });
+    // tierDefaults targets "heavy"; signal tierName is "fast" → falls through
+    // to defaultLevel "max" → { reasoning_effort: "high" }
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, signals)).toEqual({
+      options: { reasoning_effort: "high" },
+    });
+  });
+
+  it("static mode still hard-no-ops under an adaptive-shaped policy via type guard", () => {
+    // Cross-check: even when an adaptive block is present, mode === "static"
+    // still returns null. This pins the regression guard from the top of the
+    // dispatcher.
+    const policy: ReasoningPolicyConfig = {
+      mode: "static",
+      adaptive: { defaultLevel: "max" },
+    };
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, emptySignals)).toBeNull();
   });
 });
 
@@ -274,7 +420,7 @@ describe("integration — static mode never produces a patch, even with a stored
     const tier = baseTier({ variant: "thinking" });
     const policy: ReasoningPolicyConfig = { mode: "static" };
     const override = store.getOverride("s1");
-    expect(resolveReasoningOverride(tier, policy, override)).toBeNull();
+    expect(resolveReasoningOverride(tier, policy, override, emptySignals)).toBeNull();
   });
 });
 
@@ -290,8 +436,8 @@ describe("integration — surfaceLimits flag does not affect resolveReasoningOve
     const tier = baseTier({ variant: "thinking" });
     const policyOff: ReasoningPolicyConfig = { mode: "manual" };
     const policyOn: ReasoningPolicyConfig = { mode: "manual", surfaceLimits: true };
-    expect(resolveReasoningOverride(tier, policyOff, "elevated")).toEqual(
-      resolveReasoningOverride(tier, policyOn, "elevated"),
+    expect(resolveReasoningOverride(tier, policyOff, "elevated", emptySignals)).toEqual(
+      resolveReasoningOverride(tier, policyOn, "elevated", emptySignals),
     );
   });
 });

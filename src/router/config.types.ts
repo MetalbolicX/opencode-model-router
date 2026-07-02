@@ -88,20 +88,78 @@ export interface EnforcementConfig {
 }
 
 /**
- * Reasoning policy mode and per-session override knobs (PR 2 of
- * adaptive-reasoning).
+ * Single keyword rule inside `AdaptivePolicyConfig.keywordRules`.
  *
- * - `mode` defaults to `"static"` (today's behaviour preserved).
+ * `keywords` are matched case-insensitively as substrings against either the
+ * task prompt or the task description. Order in the parent array is the
+ * priority order — first match wins, so high-precision rules MUST come
+ * before catch-alls.
+ */
+export interface AdaptiveKeywordRule {
+  /** Case-insensitive substrings; a match in prompt OR description wins. */
+  keywords: string[];
+  /** Level applied when any keyword matches. */
+  level: import("../reasoning/capability.js").ReasoningLevel;
+}
+
+/**
+ * Adaptive-mode policy knobs (Plan 015). All fields are optional — the
+ * selector (`selectAdaptiveLevel`) treats every missing/null field as a
+ * fall-through to the next decision branch.
+ *
+ * - `trivialLevel` is the level applied when the dispatch-time trivial
+ *   classifier marks the session trivial. `null` (or absent) means "skip
+ *   trivial tasks entirely" — no patch is emitted.
+ * - `defaultLevel` is the catch-all for non-trivial tasks that match no
+ *   keyword rule. Same null/undefined semantics as `trivialLevel`.
+ * - `keywordRules` are evaluated in array order; first match wins.
+ * - `tierDefaults` lets operators pin a level per tier name. A tier default
+ *   wins over `defaultLevel` but loses to `trivialLevel` and `keywordRules`.
+ * - `surfaceDecision` opts into debug logs describing every adaptive
+ *   decision (selected level + reason). Off by default — production should
+ *   leave it `false` to avoid log noise.
+ *
+ * `trivialLevel` and `defaultLevel` deliberately accept `null` so configs
+ * can explicitly opt out (e.g. `base.json` ships `"trivialLevel": null`
+ * meaning "do not patch trivial sessions").
+ */
+export interface AdaptivePolicyConfig {
+  /** Level for tasks the classifier marks trivial. `null`/absent → no patch. */
+  trivialLevel?: import("../reasoning/capability.js").ReasoningLevel | null;
+  /** Level for non-trivial tasks that match no keyword rule. `null`/absent → no patch. */
+  defaultLevel?: import("../reasoning/capability.js").ReasoningLevel | null;
+  /** Keyword rules: case-insensitive substring match in prompt OR description.
+   *  First match wins (array order = priority). */
+  keywordRules?: AdaptiveKeywordRule[];
+  /** Per-tier default override. Keyed by tier name. Wins over `defaultLevel`,
+   *  loses to `trivialLevel` and `keywordRules`. */
+  tierDefaults?: Record<string, import("../reasoning/capability.js").ReasoningLevel>;
+  /** When true, emit a debug log for every adaptive decision (level + reason). */
+  surfaceDecision?: boolean;
+}
+
+/**
+ * Reasoning policy mode and per-session override knobs.
+ *
+ * - `mode` defaults to `"static"` (today's behaviour preserved). With mode
+ *   `"adaptive"`, the resolver delegates to `selectAdaptiveLevel()` over the
+ *   `adaptive` config block.
  * - `defaultLevel` is the level applied under `manual` mode when the session
- *   has no per-session override. Defaults to undefined (no implicit level).
+ *   has no per-session override, AND under `adaptive` mode when the selector
+ *   falls through to the policy default. Defaults to undefined (no implicit
+ *   level).
  * - `surfaceLimits` defaults to `false` — unsupported-level requests stay
  *   silent. Set to `true` to emit a debug log + `/reasoning` advisory note
  *   when a tier's capability cannot satisfy the requested level.
+ * - `adaptive` is the optional adaptive-mode config block. Absent under
+ *   `static`/`manual` modes; consulted only when `mode === "adaptive"`.
  */
 export interface ReasoningPolicyConfig {
   mode?: "static" | "manual" | "adaptive";
   defaultLevel?: import("../reasoning/capability.js").ReasoningLevel;
   surfaceLimits?: boolean;
+  /** Adaptive-mode knobs. Only consulted when `mode === "adaptive"`. */
+  adaptive?: AdaptivePolicyConfig;
 }
 
 export interface RouterConfig {
@@ -132,11 +190,10 @@ export interface RouterState {
   /**
    * Persisted reasoning policy mode overlay. Set via
    * `saveReasoningMode()` and applied by `applyStateOverlay()` over
-   * `cfg.reasoningPolicy.mode`. `adaptive` is intentionally absent from
-   * the persisted overlay — it is not implemented yet and the command
-   * surface rejects it explicitly.
+   * `cfg.reasoningPolicy.mode`. All three modes (`static`, `manual`,
+   * `adaptive`) round-trip through the persisted overlay as of Plan 015.
    */
-  reasoningMode?: "static" | "manual";
+  reasoningMode?: "static" | "manual" | "adaptive";
 }
 
 export type ConfigLayer = {

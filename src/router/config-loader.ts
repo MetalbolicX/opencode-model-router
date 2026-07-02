@@ -220,13 +220,13 @@ export const deepMergeConfig = (base: unknown, override: unknown): unknown => {
 // ---------------------------------------------------------------------------
 
 /**
- * Narrow type guard for the persisted `reasoningMode` overlay. The overlay
- * deliberately excludes `adaptive` — adaptive mode is not implemented yet and
- * the command surface rejects it explicitly. Keeping the overlay narrowed to
- * `static | manual` means a stale or hand-edited state file with
- * `reasoningMode: "adaptive"` is ignored instead of leaking through.
+ * Narrow type guard for the persisted `reasoningMode` overlay. Accepts the
+ * three policy modes the resolver understands (`static | manual | adaptive`).
+ * Keeping the overlay pinned to this exact set means a hand-edited state file
+ * carrying an unknown value (typo, future mode) is ignored instead of leaking
+ * through into the merged config.
  */
-const REASONING_PERSISTED_MODES = ["static", "manual"] as const;
+const REASONING_PERSISTED_MODES = ["static", "manual", "adaptive"] as const;
 const isValidReasoningMode = (v: unknown): v is (typeof REASONING_PERSISTED_MODES)[number] => {
   return typeof v === "string" && (REASONING_PERSISTED_MODES as readonly string[]).includes(v);
 };

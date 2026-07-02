@@ -2,6 +2,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AdaptiveSignals } from "../../src/reasoning/adaptive";
 import { resolveReasoningOverride } from "../../src/reasoning/policy";
 import {
   applyReasoningPatch,
@@ -84,6 +85,19 @@ const makeConfig = (overrides: Partial<RouterConfig> = {}): RouterConfig =>
     tierPrompts: {},
     ...overrides,
   }) as RouterConfig;
+
+// Placeholder signals for tests that exercise non-adaptive behaviour through
+// `resolveReasoningOverride`. The empty `prompt` / `description` ensure no
+// keyword rule could ever match even if a test accidentally left an
+// adaptive-shaped policy in place — static and manual modes never inspect
+// the signals anyway, so the slot exists only to satisfy the new 4-param
+// signature introduced for the adaptive selector (Plan 015).
+const emptySignals: AdaptiveSignals = {
+  prompt: "",
+  description: "",
+  tierName: "",
+  isTrivial: false,
+};
 
 // ---------------------------------------------------------------------------
 // Tests: buildAgentOptions
@@ -374,7 +388,7 @@ describe("integration — manual mode patch merges into agent def", () => {
     registerTierAgents(opencodeConfig, makePreset({ fast: tier }), cfg);
     const baseline = structuredClone(opencodeConfig.agent.fast);
 
-    const resolved = resolveReasoningOverride(tier, cfg.reasoningPolicy, "max");
+    const resolved = resolveReasoningOverride(tier, cfg.reasoningPolicy, "max", emptySignals);
     expect(resolved).not.toBeNull();
     applyReasoningPatch(opencodeConfig.agent.fast, resolved!);
 
@@ -391,7 +405,7 @@ describe("integration — manual mode patch merges into agent def", () => {
     registerTierAgents(opencodeConfig, makePreset({ fast: tier }), cfg);
     const baseline = structuredClone(opencodeConfig.agent.fast);
 
-    const resolved = resolveReasoningOverride(tier, cfg.reasoningPolicy, "max");
+    const resolved = resolveReasoningOverride(tier, cfg.reasoningPolicy, "max", emptySignals);
     // The primary regression guard: even when the caller asks for `max`,
     // a `none`-capability tier resolves to null.
     expect(resolved).toBeNull();
@@ -407,7 +421,7 @@ describe("integration — manual mode patch merges into agent def", () => {
     registerTierAgents(opencodeConfig, makePreset({ fast: tier }), cfg);
     const baseline = structuredClone(opencodeConfig.agent.fast);
 
-    const resolved = resolveReasoningOverride(tier, cfg.reasoningPolicy, "max");
+    const resolved = resolveReasoningOverride(tier, cfg.reasoningPolicy, "max", emptySignals);
     expect(resolved).toBeNull();
 
     applyReasoningPatch(opencodeConfig.agent.fast, resolved);

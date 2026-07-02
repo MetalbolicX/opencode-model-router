@@ -584,11 +584,15 @@ describe("Layered config — state overlay", () => {
     mkdirSync(join(tmpHome, ".config", "opencode"), { recursive: true });
     writeFileSync(
       join(tmpHome, ".config", "opencode", "opencode-model-router.state.json"),
-      JSON.stringify({ reasoningMode: "adaptive" }),
+      JSON.stringify({ reasoningMode: "bogus" }),
       "utf-8",
     );
-    // 'adaptive' is not in the persisted overlay's allowed set; the
+    // 'bogus' is not in the persisted overlay's allowed set
+    // (static | manual | adaptive — see REASONING_PERSISTED_MODES); the
     // overlay must skip it and the bundled value (manual) must survive.
+    // 'adaptive' is no longer the example here: it became a valid value
+    // in PR #2 of Plan 015 and is accepted now (covered by the
+    // "state.reasoningMode 'adaptive' wins" assertions above).
     const cfg = await readMergedConfig({ cwd: process.cwd() });
     expect(cfg.reasoningPolicy?.mode).toBe("manual");
   });
