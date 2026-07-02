@@ -157,13 +157,19 @@ describe("createReasoningStore — session override lifecycle", () => {
     expect(store.getOverride("s2")).toBe("minimal");
   });
 
-  it("clear(sessionID) also drops the pending note", () => {
+  it("clear(sessionID) also releases any tier ownership the session was holding", () => {
     const store = createReasoningStore();
     store.setOverride("s1", "max");
-    store.setPendingNote("s1", "n");
+    store.acquireTierOwner("fast", "s1");
+    store.acquireTierOwner("heavy", "s1");
+    store.acquireTierOwner("medium", "s2"); // owned by a different session
     store.clear("s1");
     expect(store.getOverride("s1")).toBeUndefined();
-    expect(store.takePendingNote("s1")).toBeUndefined();
+    // s1's locks are released
+    expect(store.getTierOwner("fast")).toBeUndefined();
+    expect(store.getTierOwner("heavy")).toBeUndefined();
+    // s2's lock survives — clear is scoped to the session
+    expect(store.getTierOwner("medium")).toBe("s2");
   });
 
   it("two sessions are isolated (the spec scenario)", () => {
@@ -178,10 +184,10 @@ describe("createReasoningStore — session override lifecycle", () => {
 });
 
 // ---------------------------------------------------------------------------
-// createReasoningStore — tier baseline + pending note bookkeeping
+// createReasoningStore — tier baseline + per-tier in-flight ownership
 // ---------------------------------------------------------------------------
 
-describe("createReasoningStore — tier baseline + pending note", () => {
+describe("createReasoningStore — tier baseline + in-flight ownership", () => {
   it("setBaseline / getBaseline round-trips the agent def reference", () => {
     const store = createReasoningStore();
     const baseline = { model: "test/model", variant: "thinking", options: { foo: "bar" } };
@@ -189,27 +195,71 @@ describe("createReasoningStore — tier baseline + pending note", () => {
     expect(store.getBaseline("medium")).toBe(baseline);
   });
 
-  it("setPendingNote / takePendingNote round-trips", () => {
-    const store = createReasoningStore();
-    store.setPendingNote("s1", "limit reached for @medium");
-    expect(store.takePendingNote("s1")).toBe("limit reached for @medium");
-  });
-
-  it("takePendingNote clears the note after first take", () => {
-    const store = createReasoningStore();
-    store.setPendingNote("s1", "n");
-    store.takePendingNote("s1");
-    expect(store.takePendingNote("s1")).toBeUndefined();
-  });
-
   it("clear(sessionID) does NOT drop baselines (baselines are tier-scoped, not session-scoped)", () => {
     const store = createReasoningStore();
     store.setBaseline("medium", { model: "test/model" });
     store.setOverride("s1", "max");
-    store.setPendingNote("s1", "n");
     store.clear("s1");
     // baseline survives — it belongs to the tier, not the session
     expect(store.getBaseline("medium")).toBeDefined();
+  });
+
+  it("acquireTierOwner returns true on a free tier and records the session as owner", () => {
+    const store = createReasoningStore();
+    expect(store.getTierOwner("fast")).toBeUndefined();
+    expect(store.acquireTierOwner("fast", "s1")).toBe(true);
+    expect(store.getTierOwner("fast")).toBe("s1");
+  });
+
+  it("acquireTierOwner is idempotent for the same session (re-acquire is a no-op)", () => {
+    const store = createReasoningStore();
+    expect(store.acquireTierOwner("fast", "s1")).toBe(true);
+    expect(store.acquireTierOwner("fast", "s1")).toBe(true);
+    expect(store.getTierOwner("fast")).toBe("s1");
+  });
+
+  it("acquireTierOwner returns false when a different session already owns the tier", () => {
+    const store = createReasoningStore();
+    expect(store.acquireTierOwner("fast", "s1")).toBe(true);
+    expect(store.acquireTierOwner("fast", "s2")).toBe(false);
+    // s1 keeps the lock; s2 did not steal it
+    expect(store.getTierOwner("fast")).toBe("s1");
+  });
+
+  it("tiers are independent: owning `fast` does not block `heavy`", () => {
+    const store = createReasoningStore();
+    expect(store.acquireTierOwner("fast", "s1")).toBe(true);
+    expect(store.acquireTierOwner("heavy", "s1")).toBe(true);
+    // two different sessions, two different tiers — both succeed
+    expect(store.acquireTierOwner("heavy", "s2")).toBe(false);
+    expect(store.getTierOwner("fast")).toBe("s1");
+    expect(store.getTierOwner("heavy")).toBe("s1");
+  });
+
+  it("releaseTierOwner returns true only when the caller is the owner", () => {
+    const store = createReasoningStore();
+    store.acquireTierOwner("fast", "s1");
+    // Foreign release — s2 is not the owner, must NOT drop s1's lock.
+    expect(store.releaseTierOwner("fast", "s2")).toBe(false);
+    expect(store.getTierOwner("fast")).toBe("s1");
+    // Owner release — succeeds and clears the lock.
+    expect(store.releaseTierOwner("fast", "s1")).toBe(true);
+    expect(store.getTierOwner("fast")).toBeUndefined();
+  });
+
+  it("releaseTierOwner on a free tier is a no-op (returns false)", () => {
+    const store = createReasoningStore();
+    expect(store.releaseTierOwner("fast", "s1")).toBe(false);
+    expect(store.getTierOwner("fast")).toBeUndefined();
+  });
+
+  it("after release, a different session can acquire the tier", () => {
+    const store = createReasoningStore();
+    expect(store.acquireTierOwner("fast", "s1")).toBe(true);
+    expect(store.acquireTierOwner("fast", "s2")).toBe(false);
+    expect(store.releaseTierOwner("fast", "s1")).toBe(true);
+    expect(store.acquireTierOwner("fast", "s2")).toBe(true);
+    expect(store.getTierOwner("fast")).toBe("s2");
   });
 });
 

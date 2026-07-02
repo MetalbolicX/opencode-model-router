@@ -2,20 +2,22 @@
 // src/reasoning/store.ts — Per-plugin-instance reasoning override store.
 //
 // Mirrors `src/guard/store.ts` (closure-factory pattern, Map keyed by
-// sessionID). Owns three concerns:
+// sessionID / tier name). Owns three concerns:
 //
 //   1. Per-session override (`set/get/clear` for a `ReasoningLevel`)
 //   2. Per-tier baseline (`set/get` for the static agent def, captured once
 //      at config time so the runtime `tool.execute.after` hook can restore it
 //      after a `tool.execute.before` patch)
-//   3. Pending note (`setPendingNote` / `takePendingNote`) — defers a
-//      `surfaceLimits`-driven advisory banner from the before-hook to the
-//      after-hook, mirroring how the guard store handles advisory notes.
+//   3. Per-tier in-flight ownership (`acquireTierOwner` / `releaseTierOwner`)
+//      — lets the plugin instance serialise concurrent patches on the same
+//      tier. A second same-tier dispatch observes `acquireTierOwner` returning
+//      `false` and skips the patch rather than overwriting the in-flight one.
 //
-// Concurrent patches on the same tier are NOT supported in this PR (open
-// question from the design). See `plans/010-adaptive-reasoning.md` for the
-// mutex question; the helper is intentionally minimal until an integration
-// test proves a race exists.
+// `setPendingNote` / `takePendingNote` from earlier drafts were removed:
+// the `surfaceLimits` advisory was never consumed downstream, so the deferred
+// note path was dead code. The runtime surfaces surfacing concerns via
+// `log.debug({ event: "reasoning.patch_applied" | "reasoning.patch_unsupported" })`
+// instead.
 // ---------------------------------------------------------------------------
 
 import type { ReasoningLevel } from "./capability.js";
@@ -35,7 +37,9 @@ export type AgentBaseline = Record<string, unknown>;
 export const createReasoningStore = () => {
   const overrides = new Map<string, ReasoningLevel>();
   const baselines = new Map<string, AgentBaseline>();
-  const pendingNotes = new Map<string, string>();
+  // Per-tier in-flight owner: the sessionID currently holding the patch lock
+  // for a given tier, or `undefined` when no patch is in flight.
+  const tierOwners = new Map<string, string>();
 
   return {
     // ----- session override ------------------------------------------------
@@ -57,21 +61,50 @@ export const createReasoningStore = () => {
       return baselines.get(tierName);
     },
 
-    // ----- pending note (deferred from before- to after-hook) --------------
-    setPendingNote(sessionID: string, note: string): void {
-      pendingNotes.set(sessionID, note);
+    // ----- per-tier in-flight ownership -----------------------------------
+    /**
+     * Try to acquire exclusive ownership of `tierName` for `sessionID`.
+     * Returns `true` when the caller now owns the tier (either it was
+     * free or the caller was already the owner — re-acquiring is a no-op,
+     * so a retry on the same session is safe). Returns `false` when a
+     * different session already owns the tier; the caller MUST skip the
+     * patch and emit a `reasoning.patch_skipped_concurrent` log event.
+     */
+    acquireTierOwner(tierName: string, sessionID: string): boolean {
+      const current = tierOwners.get(tierName);
+      if (current === undefined || current === sessionID) {
+        tierOwners.set(tierName, sessionID);
+        return true;
+      }
+      return false;
     },
-    takePendingNote(sessionID: string): string | undefined {
-      const n = pendingNotes.get(sessionID);
-      if (n !== undefined) pendingNotes.delete(sessionID);
-      return n;
+    /**
+     * Release ownership of `tierName` for `sessionID`. Returns `true` only
+     * when the caller was the owner — a foreign release returns `false`
+     * and leaves the owner untouched. The after-hook uses this to ensure
+     * a same-tier overlap can't accidentally drop another session's lock.
+     */
+    releaseTierOwner(tierName: string, sessionID: string): boolean {
+      if (tierOwners.get(tierName) !== sessionID) return false;
+      tierOwners.delete(tierName);
+      return true;
+    },
+    /**
+     * Return the current owner of `tierName`, or `undefined` when free.
+     * Exposed for tests + diagnostics; the runtime never reads this.
+     */
+    getTierOwner(tierName: string): string | undefined {
+      return tierOwners.get(tierName);
     },
 
     // ----- session teardown ------------------------------------------------
-    /** Drop every per-session record for `sessionID`. Baselines are kept. */
+    /** Drop every per-session record for `sessionID`. Baselines are kept.
+     *  Also releases any tier ownership the session was holding. */
     clear(sessionID: string): void {
       overrides.delete(sessionID);
-      pendingNotes.delete(sessionID);
+      for (const [tier, owner] of tierOwners) {
+        if (owner === sessionID) tierOwners.delete(tier);
+      }
     },
   };
 };

@@ -18,6 +18,7 @@ import type { HookEventPayload, HookPayload } from "../../src/plugin/types";
 import { createReasoningStore } from "../../src/reasoning/store";
 import type { Preset, RouterConfig } from "../../src/router/config";
 import type { TierConfig } from "../../src/router/config.types";
+import { __resetLoggerForTest } from "../../src/utils/observability";
 
 // ---------------------------------------------------------------------------
 // Module spy for `verifyTaskAfterHook`.
@@ -851,5 +852,255 @@ describe("handleToolExecuteBefore — reasoning patch path (plan 012)", () => {
     await handleToolExecuteBefore(h.ctx, { sessionID: "sid-orch", tool: "read" }, { args: {} });
 
     expect(h.ctx.opencodeConfig?.agent?.["fast"]).toEqual(baseline);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan 014 — surface-limits debug events + per-tier in-flight guard.
+//
+// These tests pin the Phase 3 contracts:
+//   - `surfaceLimits=true` causes a successful patch to emit a
+//     `reasoning.patch_applied` debug event carrying the resolved patch.
+//   - `surfaceLimits=true` + an override that resolves to null emits a
+//     `reasoning.patch_unsupported` debug event so operators can see why
+//     the requested level was not applied.
+//   - A second same-tier dispatch on a different session is skipped, not
+//     double-patched; the skip emits `reasoning.patch_skipped_concurrent`
+//     and leaves the live agent def at the in-flight patched value.
+//   - The after-hook releases the per-tier in-flight owner so subsequent
+//     dispatches can re-acquire the tier; a foreign release is a no-op.
+// ---------------------------------------------------------------------------
+
+describe("handleToolExecuteBefore/After — plan 014 surface-limits events + in-flight guard", () => {
+  // Helper: extract every `[model-router] { ... }` line the structured logger
+  // emitted to `console.log`, returning the parsed JSON envelope. This matches
+  // the pattern used by `test/unit/observability.test.ts`.
+  const captureLogEnvelopes = (calls: unknown[][]): Array<Record<string, unknown>> => {
+    return calls
+      .map((c) => String(c[0] ?? ""))
+      .filter((l) => l.startsWith("[model-router] "))
+      .map((l) => JSON.parse(l.slice(l.indexOf("{"))));
+  };
+
+  const setupSurfaceLimitsHarness = (opts: {
+    mode: "manual" | "static";
+    surfaceLimits: boolean;
+  }) => {
+    const h = makeHarness({
+      configOverrides: {
+        reasoningPolicy: { mode: opts.mode, surfaceLimits: opts.surfaceLimits },
+        presets: {
+          default: {
+            fast: {
+              model: "anthropic/claude-haiku-4-5",
+              description: "fast",
+              whenToUse: [],
+              variant: "thinking",
+            } as TierConfig,
+          },
+        },
+      },
+    });
+    const baseline = {
+      model: "anthropic/claude-haiku-4-5",
+      mode: "subagent",
+      description: "fast",
+      prompt: "test prompt",
+      variant: "low",
+    };
+    h.ctx.opencodeConfig = { agent: { fast: { ...baseline } } };
+    h.ctx.reasoningStore.setBaseline("fast", structuredClone(baseline));
+    return { h, baseline };
+  };
+
+  let origLevel: string | undefined;
+  beforeEach(() => {
+    origLevel = process.env["MODEL_ROUTER_LOG_LEVEL"];
+    // Debug-level events are filtered by the production default ("warn"),
+    // so we MUST opt in for the test runtime to see them.
+    process.env["MODEL_ROUTER_LOG_LEVEL"] = "debug";
+    __resetLoggerForTest();
+  });
+  afterEach(() => {
+    if (origLevel === undefined) delete process.env["MODEL_ROUTER_LOG_LEVEL"];
+    else process.env["MODEL_ROUTER_LOG_LEVEL"] = origLevel;
+    __resetLoggerForTest();
+    // Spies on `console.log` from the per-test setup leak across tests
+    // in this describe (vitest 4 only auto-restores on `vi.restoreAllMocks()`).
+    vi.restoreAllMocks();
+  });
+
+  it("surfaceLimits=true + manual + override → emits reasoning.patch_applied debug event", async () => {
+    const { h } = setupSurfaceLimitsHarness({ mode: "manual", surfaceLimits: true });
+    h.ctx.reasoningStore.setOverride("sid-orch", "elevated");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await handleToolExecuteBefore(
+      h.ctx,
+      { sessionID: "sid-orch", tool: "task", args: { subagent_type: "fast" } },
+      { args: { subagent_type: "fast" } },
+    );
+
+    const envelopes = captureLogEnvelopes(logSpy.mock.calls);
+    const applied = envelopes.filter((e) => e["event"] === "reasoning.patch_applied");
+    expect(applied).toHaveLength(1);
+    const env = applied[0]!;
+    expect(env["level"]).toBe("debug");
+    expect(env["session"]).toBe("sid-orch");
+    expect(env["tier"]).toBe("fast");
+    expect(env["override"]).toBe("elevated");
+    // The resolved patch is the binary capability's elevated variant
+    // ("thinking"). The exact shape is owned by `resolveReasoningOverride`
+    // — here we only assert it carries the variant field the plugin applied.
+    expect((env["patch"] as Record<string, unknown>)["variant"]).toBe("thinking");
+  });
+
+  it("surfaceLimits=false → no debug event (the surfacing is opt-in)", async () => {
+    const { h } = setupSurfaceLimitsHarness({ mode: "manual", surfaceLimits: false });
+    h.ctx.reasoningStore.setOverride("sid-orch", "elevated");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await handleToolExecuteBefore(
+      h.ctx,
+      { sessionID: "sid-orch", tool: "task", args: { subagent_type: "fast" } },
+      { args: { subagent_type: "fast" } },
+    );
+
+    const envelopes = captureLogEnvelopes(logSpy.mock.calls);
+    const reasoningEvents = envelopes.filter(
+      (e) => typeof e["event"] === "string" && (e["event"] as string).startsWith("reasoning."),
+    );
+    expect(reasoningEvents).toHaveLength(0);
+  });
+
+  it("surfaceLimits=true + override that resolves to null → emits reasoning.patch_unsupported", async () => {
+    // Build a tier with `kind: "none"` so resolveReasoningOverride always
+    // returns null, even with a manual policy + a non-null override.
+    const h = makeHarness({
+      configOverrides: {
+        reasoningPolicy: { mode: "manual", surfaceLimits: true },
+        presets: {
+          default: {
+            fast: {
+              model: "anthropic/claude-haiku-4-5",
+              description: "fast",
+              whenToUse: [],
+              capability: { kind: "none" },
+            } as TierConfig,
+          },
+        },
+      },
+    });
+    h.ctx.opencodeConfig = { agent: { fast: { variant: "low" } } };
+    h.ctx.reasoningStore.setBaseline("fast", { variant: "low" });
+    h.ctx.reasoningStore.setOverride("sid-orch", "elevated");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await handleToolExecuteBefore(
+      h.ctx,
+      { sessionID: "sid-orch", tool: "task", args: { subagent_type: "fast" } },
+      { args: { subagent_type: "fast" } },
+    );
+
+    const envelopes = captureLogEnvelopes(logSpy.mock.calls);
+    const unsupported = envelopes.filter((e) => e["event"] === "reasoning.patch_unsupported");
+    expect(unsupported).toHaveLength(1);
+    const env = unsupported[0]!;
+    expect(env["session"]).toBe("sid-orch");
+    expect(env["tier"]).toBe("fast");
+    expect(env["override"]).toBe("elevated");
+  });
+
+  it("same-tier overlap is skipped, not double-patched; emits reasoning.patch_skipped_concurrent", async () => {
+    const { h, baseline } = setupSurfaceLimitsHarness({ mode: "manual", surfaceLimits: true });
+    h.ctx.reasoningStore.setOverride("sid-A", "elevated");
+    h.ctx.reasoningStore.setOverride("sid-B", "max");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    // First dispatch: sid-A patches the agent def.
+    await handleToolExecuteBefore(
+      h.ctx,
+      { sessionID: "sid-A", tool: "task", args: { subagent_type: "fast" } },
+      { args: { subagent_type: "fast" } },
+    );
+    expect(h.ctx.opencodeConfig?.agent?.["fast"]?.variant).toBe("thinking");
+    expect(h.ctx.reasoningStore.getTierOwner("fast")).toBe("sid-A");
+
+    // Second same-tier dispatch from sid-B must be SKIPPED, not overwriting
+    // sid-A's in-flight patch.
+    await handleToolExecuteBefore(
+      h.ctx,
+      { sessionID: "sid-B", tool: "task", args: { subagent_type: "fast" } },
+      { args: { subagent_type: "fast" } },
+    );
+
+    // Variant is still sid-A's elevated value (binary `elevated` = "thinking"),
+    // not sid-B's `max` patch. The live def has NOT been double-mutated.
+    expect(h.ctx.opencodeConfig?.agent?.["fast"]?.variant).toBe("thinking");
+    // Ownership is still sid-A's — sid-B did not steal the lock.
+    expect(h.ctx.reasoningStore.getTierOwner("fast")).toBe("sid-A");
+    // The agent def has not been reset to baseline either.
+    expect(h.ctx.opencodeConfig?.agent?.["fast"]).not.toEqual(baseline);
+
+    // The skip was logged with the documented event name and the owner field.
+    const envelopes = captureLogEnvelopes(logSpy.mock.calls);
+    const skipped = envelopes.filter((e) => e["event"] === "reasoning.patch_skipped_concurrent");
+    expect(skipped).toHaveLength(1);
+    const env = skipped[0]!;
+    expect(env["session"]).toBe("sid-B");
+    expect(env["tier"]).toBe("fast");
+    expect(env["owner"]).toBe("sid-A");
+  });
+
+  it("after-hook releases the per-tier owner so the next dispatch can re-acquire", async () => {
+    const { h } = setupSurfaceLimitsHarness({ mode: "manual", surfaceLimits: true });
+    h.ctx.reasoningStore.setOverride("sid-A", "elevated");
+    h.ctx.reasoningStore.setOverride("sid-B", "max");
+
+    // sid-A patches + restores.
+    await handleToolExecuteBefore(
+      h.ctx,
+      { sessionID: "sid-A", tool: "task", args: { subagent_type: "fast" } },
+      { args: { subagent_type: "fast" } },
+    );
+    expect(h.ctx.reasoningStore.getTierOwner("fast")).toBe("sid-A");
+
+    await handleToolExecuteAfter(
+      h.ctx,
+      { sessionID: "sid-A", tool: "task", args: { subagent_type: "fast" } },
+      { output: "ok" },
+    );
+    // After-hook released the lock — the tier is free again.
+    expect(h.ctx.reasoningStore.getTierOwner("fast")).toBeUndefined();
+
+    // sid-B can now acquire and patch — proves the lock was released, not
+    // leaked by the after-hook.
+    await handleToolExecuteBefore(
+      h.ctx,
+      { sessionID: "sid-B", tool: "task", args: { subagent_type: "fast" } },
+      { args: { subagent_type: "fast" } },
+    );
+    expect(h.ctx.reasoningStore.getTierOwner("fast")).toBe("sid-B");
+  });
+
+  it("after-hook does not release a foreign owner's lock (release is owner-checked)", async () => {
+    // Simulate a stale after-hook call: another session (sid-stale) fires
+    // the after-hook for a tier that sid-current owns. The release MUST
+    // return false and sid-current's lock must survive.
+    const { h } = setupSurfaceLimitsHarness({ mode: "manual", surfaceLimits: false });
+    h.ctx.reasoningStore.acquireTierOwner("fast", "sid-current");
+    h.ctx.reasoningStore.setBaseline("fast", { variant: "x" });
+
+    await handleToolExecuteAfter(
+      h.ctx,
+      // A foreign session is sending the after-hook for "fast" — the runtime
+      // is the one calling releaseTierOwner with whatever sid is in the
+      // payload, regardless of who actually acquired the lock.
+      { sessionID: "sid-stale", tool: "task", args: { subagent_type: "fast" } },
+      { output: "ok" },
+    );
+
+    // sid-current's lock survives — the foreign release was a no-op.
+    expect(h.ctx.reasoningStore.getTierOwner("fast")).toBe("sid-current");
   });
 });
