@@ -5,15 +5,16 @@
 // XDG-aware path resolved by `./config-paths.ts` (preferred:
 // `$XDG_CONFIG_HOME/opencode/opencode-model-router.state.json`; legacy
 // fallback: `$HOME/.config/opencode/opencode-model-router.state.json`).
-// The state overlays ONLY `activePreset`, `activeMode`, and
-// `enforcementMode` on top of the merged manual config; it never touches
+// The state overlays ONLY `activePreset`, `activeMode`, `enforcementMode`,
+// and `reasoningMode` on top of the merged manual config; it never touches
 // `tiers.json`.
 //
-// `saveActivePreset()`, `saveActiveMode()`, and `saveEnforcementMode()`
-// are the user-facing state-mutation helpers called from `/preset`,
-// `/budget`, and `/router enforce` commands. They each validate the
-// requested value against the current merged config and skip the
-// write if the value is invalid.
+// `saveActivePreset()`, `saveActiveMode()`, `saveEnforcementMode()`, and
+// `saveReasoningMode()` are the user-facing state-mutation helpers called
+// from `/preset`, `/budget`, `/router enforce`, and the reasoning
+// `mode` subcommand respectively. They each validate the requested value
+// against the current merged config and skip the write if the value is
+// invalid.
 //
 // PR3b converts the IO to `node:fs/promises`. The atomic-write contract
 // (tmp + rename) is preserved; the loader / state-mutation helpers
@@ -160,6 +161,20 @@ export const saveActiveMode = async (modeName: string): Promise<void> => {
 
 export const saveEnforcementMode = async (mode: "off" | "advisory" | "enforced"): Promise<void> => {
   await writeState({ enforcementMode: mode });
+};
+
+/**
+ * Persist the runtime reasoning policy mode overlay. Mirrors the
+ * `saveEnforcementMode()` shape — no validation against the merged
+ * config because the type union itself is the contract; an unknown
+ * value cannot reach this function (callers parse the literal set).
+ *
+ * The overlay is consumed by `applyStateOverlay()` in `config-loader.ts`
+ * and overrides `cfg.reasoningPolicy.mode` on the next config refresh.
+ * Mode switching survives restarts via the persisted state file.
+ */
+export const saveReasoningMode = async (mode: "static" | "manual"): Promise<void> => {
+  await writeState({ reasoningMode: mode });
 };
 
 // Suppress unused-import linter complaints for `join` when the source

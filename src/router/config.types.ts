@@ -129,6 +129,14 @@ export interface RouterState {
   activePreset?: string;
   activeMode?: string;
   enforcementMode?: "off" | "advisory" | "enforced";
+  /**
+   * Persisted reasoning policy mode overlay. Set via
+   * `saveReasoningMode()` and applied by `applyStateOverlay()` over
+   * `cfg.reasoningPolicy.mode`. `adaptive` is intentionally absent from
+   * the persisted overlay — it is not implemented yet and the command
+   * surface rejects it explicitly.
+   */
+  reasoningMode?: "static" | "manual";
 }
 
 export type ConfigLayer = {

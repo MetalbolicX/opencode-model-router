@@ -77,13 +77,13 @@ Top-level `tiers.json` fields. All blocks are optional and additive; omitting a 
 
 ## `reasoningPolicy`
 
-Optional top-level block in `tiers.json`. Fully additive — omitting the block resolves to `mode: "static"`, which is a hard no-op (the policy resolver returns `null` regardless of any session override, and the agent def is left exactly as `registerTierAgents` produced it). The bundled default since Plan 010 PR 3 is `mode: "manual"`, which lets the `/reasoning` command apply session-scoped overrides.
+Optional top-level block in `tiers.json`. Fully additive — omitting the block resolves to `mode: "static"`, which is a hard no-op (the policy resolver returns `null` regardless of any session override, and the agent def is left exactly as `registerTierAgents` produced it). The bundled default since Plan 010 PR 3 is `mode: "manual"`, which lets the `/model-router-reasoning` command apply session-scoped overrides.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `mode` | `"static" \| "manual" \| "adaptive"` | `"static"` when the block is absent, `"manual"` in the bundled `base.json` | See [Policy modes](#policy-modes) below. |
 | `defaultLevel` | `"minimal" \| "normal" \| "elevated" \| "max"` | _(none)_ | Optional fallback applied under `manual` mode when the session has no override. |
-| `surfaceLimits` | `boolean` | `false` | When `true`, `/reasoning` output and the runtime log layer flag tiers that cannot satisfy the requested level. See [REASONING.md → surfaceLimits](./REASONING.md#surfacelimits). |
+| `surfaceLimits` | `boolean` | `false` | When `true`, `/model-router-reasoning` output and the runtime log layer flag tiers that cannot satisfy the requested level. See [REASONING.md → surfaceLimits](./REASONING.md#surfacelimits). |
 
 ### Policy modes
 

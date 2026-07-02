@@ -3,7 +3,13 @@ import type { ReasoningCapability, ReasoningLevel } from "../reasoning/capabilit
 import { inferCapability } from "../reasoning/capability.js";
 import { translateLevel } from "../reasoning/translate.js";
 import type { RouterConfig } from "./config";
-import { resolvePresetName, saveActiveMode, saveActivePreset, saveEnforcementMode } from "./config";
+import {
+  resolvePresetName,
+  saveActiveMode,
+  saveActivePreset,
+  saveEnforcementMode,
+  saveReasoningMode,
+} from "./config";
 import { resolveEnforcementMode } from "./enforcement";
 import { getActiveTiers } from "./protocol";
 
@@ -177,12 +183,20 @@ export const buildPresetOutput = async (cfg: RouterConfig, args: string): Promis
 };
 
 // ---------------------------------------------------------------------------
-// /reasoning command output (PR 2 of adaptive-reasoning).
+// /model-router-reasoning command output (PR 2 of model-router-reasoning-mode-switch).
 //
-// Validates the argument against the 4 normalized levels (or `off`), sets /
-// clears the per-session override on `ctx.reasoningStore`, and returns a
-// confirmation that names the targeted tier's capability and whether the
-// level actually applies or collapses onto a coarser rung.
+// Two responsibilities, parsed from the first token:
+//   1. `mode <static|manual>` — persist a runtime policy-mode switch via
+//      `saveReasoningMode()`. `adaptive` is explicitly rejected (not
+//      implemented yet). With no mode argument, show the current mode and
+//      usage. This is a PERSISTED config overlay that survives restarts.
+//   2. `<level>` (one of `minimal|normal|elevated|max`, or `off`) — set /
+//      clear the per-session override on `ctx.reasoningStore`. The override
+//      is stored regardless of the current policy mode; whether the runtime
+//      applies it at task dispatch is controlled by the resolved
+//      `reasoningPolicy.mode` at that moment. The previous "edit tiers.json"
+//      redirect for static mode was removed in favour of this `mode`
+//      subcommand.
 //
 // Honors `reasoningPolicy.surfaceLimits`: when true, emits an advisory note
 // describing any collapse (e.g. `normal` and `elevated` both mapping to
@@ -255,10 +269,12 @@ export const buildReasoningOutput = async (
   const surfaceLimits = cfg.reasoningPolicy?.surfaceLimits === true;
   const policyMode = cfg.reasoningPolicy?.mode ?? "static";
 
-  const arg = (args ?? "").trim().toLowerCase();
+  const tokens = (args ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const sub = tokens[0] ?? "";
 
-  // Show help when no args — describe every active tier's capability.
-  if (!arg) {
+  // Show help when no args — describe every active tier's capability and
+  // the full subcommand surface (mode + level).
+  if (tokens.length === 0) {
     const tiers = getActiveTiers(cfg);
     const lines: string[] = [
       `# Reasoning Overrides`,
@@ -271,13 +287,52 @@ export const buildReasoningOutput = async (
     }
     lines.push(
       "",
-      "Set with: `/reasoning minimal|normal|elevated|max`. Clear with `/reasoning off`.",
+      "Set per-session override: `/model-router-reasoning minimal|normal|elevated|max`. Clear with `/model-router-reasoning off`.",
+      "Switch persisted policy mode: `/model-router-reasoning mode <static|manual>`.",
       "Applies to the next `task` dispatch in this session only.",
     );
     return lines.join("\n");
   }
 
-  if (arg === "off") {
+  // --- `mode` subcommand: persists a policy-mode overlay via state file. ---
+  if (sub === "mode") {
+    const modeArg = tokens[1] ?? "";
+    if (!modeArg) {
+      return [
+        `Current reasoning policy mode: **${policyMode}**`,
+        "",
+        "Usage: `/model-router-reasoning mode <static|manual>`",
+        "`static` uses each tier's default reasoning level.",
+        "`manual` enables per-session overrides via `minimal|normal|elevated|max`.",
+        "",
+        "Note: `adaptive` is not implemented yet.",
+      ].join("\n");
+    }
+    if (modeArg === "static" || modeArg === "manual") {
+      await saveReasoningMode(modeArg);
+      return [
+        `Reasoning policy mode set to **${modeArg}** and persisted.`,
+        "",
+        modeArg === "static"
+          ? "Per-tier defaults are in effect — per-session overrides are ignored at task dispatch."
+          : "Per-session overrides are enabled — `/model-router-reasoning minimal|normal|elevated|max` will take effect on the next task dispatch.",
+        "",
+        "Takes effect on the next config refresh.",
+      ].join("\n");
+    }
+    if (modeArg === "adaptive") {
+      return [
+        "**adaptive** is not implemented yet.",
+        "",
+        "Available modes: `static`, `manual`.",
+        "When the adaptive engine ships, this command will accept `adaptive` as a value.",
+      ].join("\n");
+    }
+    return `Unknown mode: "${modeArg}". Use one of: static, manual (or run '/model-router-reasoning mode' for the current value).`;
+  }
+
+  // --- per-session override flow (minimal|normal|elevated|max|off) ---
+  if (sub === "off") {
     if (sessionID) ctx.reasoningStore.clearOverride(sessionID);
     return [
       "Reasoning override cleared.",
@@ -286,27 +341,21 @@ export const buildReasoningOutput = async (
     ].join("\n");
   }
 
-  if (!REASONING_LEVELS.has(arg as ReasoningLevel)) {
-    return `Unknown level: "${arg}". Use one of: minimal, normal, elevated, max (or "off" to clear).`;
+  if (!REASONING_LEVELS.has(sub as ReasoningLevel)) {
+    return `Unknown level: "${sub}". Use one of: minimal, normal, elevated, max (or "off" to clear). Run '/model-router-reasoning mode' to switch the policy.`;
   }
 
-  if (policyMode === "static") {
-    return [
-      `Requested level: **${arg}**`,
-      "",
-      `Reasoning policy mode is **static** — the override will NOT be applied at task dispatch.`,
-      "Set `reasoningPolicy.mode` to `manual` in `tiers.json` to enable per-session overrides.",
-    ].join("\n");
-  }
-
-  if (sessionID) ctx.reasoningStore.setOverride(sessionID, arg as ReasoningLevel);
+  // The override is stored regardless of the current policy mode. The runtime
+  // is responsible for honoring `reasoningPolicy.mode === "manual"` at task
+  // dispatch — this command is no longer the gatekeeper.
+  if (sessionID) ctx.reasoningStore.setOverride(sessionID, sub as ReasoningLevel);
 
   // Per-tier acknowledgement: which tiers can actually satisfy the level,
   // which collapse, and which can't (none capability → silent no-op unless
   // surfaceLimits is enabled).
   const tiers = getActiveTiers(cfg);
   const lines: string[] = [
-    `Reasoning override set to **${arg}** for this session.`,
+    `Reasoning override set to **${sub}** for this session.`,
     "",
     "Per-tier behaviour:",
   ];
@@ -317,10 +366,10 @@ export const buildReasoningOutput = async (
       if (surfaceLimits) lines.push(`- @${name}: unsupported (no reasoning control).`);
       continue;
     }
-    const resolved = translateLevel(cap, arg as ReasoningLevel);
+    const resolved = translateLevel(cap, sub as ReasoningLevel);
     if (!resolved) {
       if (surfaceLimits) {
-        lines.push(`- @${name}: level '${arg}' is a no-op for this tier's capability.`);
+        lines.push(`- @${name}: level '${sub}' is a no-op for this tier's capability.`);
       }
       continue;
     }
@@ -330,7 +379,7 @@ export const buildReasoningOutput = async (
     if (resolved.options) {
       lines.push(`- @${name}: options = ${JSON.stringify(resolved.options)}.`);
     }
-    const note = detectCollapse(cap, arg as ReasoningLevel);
+    const note = detectCollapse(cap, sub as ReasoningLevel);
     if (note) {
       anyCollapse = true;
       if (surfaceLimits) lines.push(`  ${note}`);
@@ -352,8 +401,9 @@ export const buildReasoningOutput = async (
 
 /**
  * Populate `opencodeConfig.command` with the router-owned command set:
- * `/tiers`, `/preset`, `/budget`, `/bypass`, `/annotate-plan`, and `/router`.
- * Mirrors the block that lived in `src/index.ts`'s `config()` hook.
+ * `/tiers`, `/preset`, `/budget`, `/bypass`, `/annotate-plan`, `/router`,
+ * and `/model-router-reasoning`. Mirrors the block that lived in
+ * `src/index.ts`'s `config()` hook.
  *
  * Side-effect only — the returned void matches the original inline block.
  */
@@ -417,10 +467,10 @@ export const registerRouterCommands = (opencodeConfig: {
     template: "$ARGUMENTS",
     description: "Model-router controls (e.g., /router enforce off|advisory|enforced)",
   };
-  opencodeConfig.command["reasoning"] = {
+  opencodeConfig.command["model-router-reasoning"] = {
     template: "$ARGUMENTS",
     description:
-      "Set reasoning level: /reasoning minimal|normal|elevated|max (set) | /reasoning off (clear)",
+      "Reasoning control: /model-router-reasoning mode <static|manual> (persists) | /model-router-reasoning minimal|normal|elevated|max (set) | /model-router-reasoning off (clear)",
   };
 };
 
@@ -430,9 +480,9 @@ export const registerRouterCommands = (opencodeConfig: {
 
 /**
  * Dispatch handler for the `command.execute.before` hook. Pushes a text
- * part onto `output.parts` for `/tiers`, `/preset`, `/budget`, and `/router`,
- * and toggles `ctx.state.bypassed` for `/bypass`. Mirrors the block that
- * lived inline in `src/index.ts`.
+ * part onto `output.parts` for `/tiers`, `/preset`, `/budget`, `/router`,
+ * and `/model-router-reasoning`, and toggles `ctx.state.bypassed` for
+ * `/bypass`. Mirrors the block that lived inline in `src/index.ts`.
  *
  * The function is async because the hook itself was async; the body performs
  * no asynchronous work (the await was structural). Errors in `refreshConfig()`
@@ -497,7 +547,7 @@ export const handleCommandBefore = async (
     });
   }
 
-  if (input.command === "reasoning") {
+  if (input.command === "model-router-reasoning") {
     const cfg = await ctx.getFreshConfig();
     output.parts.push({
       type: "text" as const,

@@ -13,6 +13,7 @@ import {
   handleCommandBefore,
 } from "../../src/router/commands";
 import type { Preset, RouterConfig, TierConfig } from "../../src/router/config";
+import { readState } from "../../src/router/config";
 
 let tmpHome: string;
 let origHOME: string | undefined;
@@ -362,15 +363,16 @@ describe("buildReasoningOutput", () => {
     expect(out).toContain("max");
   });
 
-  it("static mode warns that the override will NOT be applied", async () => {
+  it("static mode still writes the override; the runtime decides whether to apply it", async () => {
+    // The "edit tiers.json" redirect was removed in favour of the `mode`
+    // subcommand. The override is now stored regardless of the current
+    // policy mode; the runtime honors `mode === "manual"` at task dispatch.
     const cfg = makeConfig({ reasoningPolicy: { mode: "static" } });
     const ctx = makeReasoningCtx(cfg);
     const out = await buildReasoningOutput(cfg, "elevated", ctx, "sess-1");
-    expect(out).toContain("Requested level: **elevated**");
-    expect(out).toContain("static");
-    expect(out).toContain("will NOT be applied");
-    // Static mode must NOT touch the store — the regression guard.
-    expect(ctx.reasoningStore.getOverride("sess-1")).toBeUndefined();
+    expect(out).toContain("Reasoning override set to **elevated**");
+    expect(out).not.toContain("will NOT be applied");
+    expect(ctx.reasoningStore.getOverride("sess-1")).toBe("elevated");
   });
 
   it("manual mode writes the override onto the store", async () => {
@@ -439,17 +441,86 @@ describe("buildReasoningOutput", () => {
 });
 
 // ---------------------------------------------------------------------------
-// handleCommandBefore — /reasoning branch (PR 2)
+// buildReasoningOutput — `mode` subcommand (PR 2 of model-router-reasoning-mode-switch)
+//
+// The mode subcommand persists the reasoning policy mode via saveReasoningMode().
+// `adaptive` is explicitly rejected as not-implemented. With no mode argument
+// the command reports the current effective mode and usage.
 // ---------------------------------------------------------------------------
 
-describe("handleCommandBefore — /reasoning branch", () => {
-  it("pushes a text part for the /reasoning command", async () => {
+describe("buildReasoningOutput — `mode` subcommand", () => {
+  it("`mode` (no arg) shows current mode + usage for static and manual + adaptive note", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
+    const out = await buildReasoningOutput(cfg, "mode", makeReasoningCtx(cfg), "sess-1");
+    expect(out).toContain("Current reasoning policy mode: **manual**");
+    expect(out).toContain("Usage: `/model-router-reasoning mode <static|manual>`");
+    expect(out).toContain("`static`");
+    expect(out).toContain("`manual`");
+    expect(out).toContain("adaptive");
+    expect(out).toContain("not implemented");
+  });
+
+  it("`mode` (no arg) reports the default 'static' when no policy is configured", async () => {
+    const cfg = makeConfig();
+    const out = await buildReasoningOutput(cfg, "mode", makeReasoningCtx(cfg), "sess-1");
+    expect(out).toContain("Current reasoning policy mode: **static**");
+  });
+
+  it("`mode static` persists and reports the static description", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
+    const out = await buildReasoningOutput(cfg, "mode static", makeReasoningCtx(cfg), "sess-1");
+    expect(out).toContain("Reasoning policy mode set to **static** and persisted");
+    expect(out).toContain("Per-tier defaults");
+    const state = await readState();
+    expect(state.reasoningMode).toBe("static");
+  });
+
+  it("`mode manual` persists and reports the manual description", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "static" } });
+    const out = await buildReasoningOutput(cfg, "mode manual", makeReasoningCtx(cfg), "sess-1");
+    expect(out).toContain("Reasoning policy mode set to **manual** and persisted");
+    expect(out).toContain("Per-session overrides are enabled");
+    const state = await readState();
+    expect(state.reasoningMode).toBe("manual");
+  });
+
+  it("`mode adaptive` is rejected clearly as not implemented", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "static" } });
+    const out = await buildReasoningOutput(cfg, "mode adaptive", makeReasoningCtx(cfg), "sess-1");
+    expect(out).toContain("adaptive");
+    expect(out).toContain("not implemented");
+    // Verify no state was written — adaptive must not leak into the overlay.
+    const state = await readState();
+    expect(state.reasoningMode).toBeUndefined();
+  });
+
+  it("`mode <unknown>` is rejected with a clear error", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
+    const out = await buildReasoningOutput(cfg, "mode foo", makeReasoningCtx(cfg), "sess-1");
+    expect(out).toContain("Unknown mode");
+    expect(out).toContain("foo");
+  });
+
+  it("help text (no args) documents the `mode` subcommand", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
+    const out = await buildReasoningOutput(cfg, "", makeReasoningCtx(cfg), "sess-1");
+    expect(out).toContain("Switch persisted policy mode");
+    expect(out).toContain("/model-router-reasoning mode <static|manual>");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleCommandBefore — /model-router-reasoning branch (PR 2 of model-router-reasoning-mode-switch)
+// ---------------------------------------------------------------------------
+
+describe("handleCommandBefore — /model-router-reasoning branch", () => {
+  it("pushes a text part for the /model-router-reasoning command (level override)", async () => {
     const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
     const ctx = makeReasoningCtx(cfg);
     const output: { parts: any[] } = { parts: [] };
     await handleCommandBefore(
       ctx,
-      { command: "reasoning", arguments: "elevated", sessionID: "sess-cmd" },
+      { command: "model-router-reasoning", arguments: "elevated", sessionID: "sess-cmd" },
       output,
     );
     expect(output.parts).toHaveLength(1);
@@ -458,11 +529,44 @@ describe("handleCommandBefore — /reasoning branch", () => {
     expect(ctx.reasoningStore.getOverride("sess-cmd")).toBe("elevated");
   });
 
-  it("/reasoning with no args shows the capability summary", async () => {
+  it("/model-router-reasoning with no args shows the capability summary", async () => {
     const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
     const ctx = makeReasoningCtx(cfg);
     const output: { parts: any[] } = { parts: [] };
-    await handleCommandBefore(ctx, { command: "reasoning", sessionID: "sess-cmd" }, output);
+    await handleCommandBefore(
+      ctx,
+      { command: "model-router-reasoning", sessionID: "sess-cmd" },
+      output,
+    );
     expect(output.parts[0].text).toContain("# Reasoning Overrides");
+  });
+
+  it("/model-router-reasoning mode static dispatches and persists", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
+    const ctx = makeReasoningCtx(cfg);
+    const output: { parts: any[] } = { parts: [] };
+    await handleCommandBefore(
+      ctx,
+      { command: "model-router-reasoning", arguments: "mode static", sessionID: "sess-cmd" },
+      output,
+    );
+    expect(output.parts).toHaveLength(1);
+    expect(output.parts[0].text).toContain("Reasoning policy mode set to **static** and persisted");
+    const state = await readState();
+    expect(state.reasoningMode).toBe("static");
+  });
+
+  it("/model-router-reasoning mode adaptive dispatches and is rejected", async () => {
+    const cfg = makeConfig({ reasoningPolicy: { mode: "static" } });
+    const ctx = makeReasoningCtx(cfg);
+    const output: { parts: any[] } = { parts: [] };
+    await handleCommandBefore(
+      ctx,
+      { command: "model-router-reasoning", arguments: "mode adaptive", sessionID: "sess-cmd" },
+      output,
+    );
+    expect(output.parts[0].text).toContain("not implemented");
+    const state = await readState();
+    expect(state.reasoningMode).toBeUndefined();
   });
 });

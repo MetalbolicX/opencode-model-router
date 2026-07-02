@@ -106,7 +106,11 @@ export const handleToolExecuteBefore = async (
   // are blocked at the nested-task guard below.
   //
   // Reads:
-  //   - `ctx.reasoningStore.getOverride(sid)` — session override from /reasoning
+  //   - `ctx.reasoningStore.getOverride(sid)` — session override from
+  //     /model-router-reasoning
+  //   - `ctx.reasoningStore.acquireTierOwner(tierName, sid)` — per-tier
+  //     in-flight ownership; a second same-tier dispatch observes
+  //     `false` and is skipped before any mutation
   //   - `cfg.reasoningPolicy` — mode + defaultLevel + surfaceLimits
   //   - `ctx.opencodeConfig.agent[tierName]` — the agent def to mutate
   //
@@ -129,6 +133,21 @@ export const handleToolExecuteBefore = async (
           const tiers = getActiveTiers(cfg);
           const tier = tiers[subagentType];
           if (tier) {
+            // Per-tier in-flight guard: only one patch may be active per tier
+            // at a time. A second same-tier dispatch observes a `false` from
+            // `acquireTierOwner` and skips the patch — overwriting an
+            // in-flight agent def would scramble the active subagent.
+            const acquired = ctx.reasoningStore.acquireTierOwner(subagentType, sid);
+            if (!acquired) {
+              const owner = ctx.reasoningStore.getTierOwner(subagentType);
+              log.debug({
+                event: "reasoning.patch_skipped_concurrent",
+                session: sid,
+                tier: subagentType,
+                owner,
+              });
+              return;
+            }
             const override = ctx.reasoningStore.getOverride(sid);
             const resolved = resolveReasoningOverride(tier, cfg.reasoningPolicy, override);
             if (resolved) {
@@ -249,6 +268,14 @@ export const handleToolExecuteAfter = async (
         const baseline = ctx.reasoningStore.getBaseline(subagentType);
         if (baseline) {
           restoreAgentBaseline(agentDef, baseline);
+        }
+        // Release the per-tier in-flight ownership acquired in
+        // `handleToolExecuteBefore`. `releaseTierOwner` is owner-checked —
+        // a foreign release (e.g. an after-hook that fires for a different
+        // session than the one that acquired) returns `false` and leaves
+        // the lock intact.
+        if (sid) {
+          ctx.reasoningStore.releaseTierOwner(subagentType, sid);
         }
       }
     } catch (err) {
@@ -413,9 +440,9 @@ export const handleConfig = async (
   // the runtime `tool.execute.after` hook can restore exactly the shape
   // `registerTierAgents` produced. We snapshot AFTER registration so the
   // baseline is the post-static-build output (including any prompt / color /
-  // variant / options the static config emitted). Concurrent patches on the
-  // same tier are NOT serialised — see the open Q in
-  // `plans/010-adaptive-reasoning.md`.
+  // variant / options the static config emitted). Same-tier patches are
+  // serialised by the per-tier in-flight owner in
+  // `ctx.reasoningStore.acquireTierOwner` — see `src/reasoning/store.ts`.
   ctx.opencodeConfig = opencodeConfig;
   const agentMap = opencodeConfig?.agent as Record<string, Record<string, unknown>> | undefined;
   if (agentMap) {

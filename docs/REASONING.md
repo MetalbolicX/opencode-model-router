@@ -4,11 +4,11 @@ The router exposes a provider-agnostic way to control how much each subagent rea
 
 1. A **capability model** that describes what each tier can do (none / binary / discrete / budgeted).
 2. A **normalized level vocabulary** (`minimal` / `normal` / `elevated` / `max`) that is the same for every tier.
-3. A **session-scoped override** set with the `/reasoning` command and applied at `task` dispatch time via `tool.execute.before`.
+3. A **session-scoped override** set with the `/model-router-reasoning` command and applied at `task` dispatch time via `tool.execute.before`.
 
 Pre-Plan-010 tier configs continue to work: capability is **inferred** from existing fields (`variant`, `reasoning.effort`, `thinking.budgetTokens`) when no explicit declaration is present. The bundled presets now declare capability explicitly — see [Capability declarations](#capability-declarations) — so inference is a safety net, not the primary path.
 
-**Cross-references:** [CONFIG_REFERENCE.md → `reasoningPolicy`](./CONFIG_REFERENCE.md#reasoningpolicy) · [Capability declarations](#capability-declarations) · [`/reasoning` command](#reasoning-command) · [Backward compatibility](#backward-compatibility) · [`surfaceLimits`](#surfacelimits)
+**Cross-references:** [CONFIG_REFERENCE.md → `reasoningPolicy`](./CONFIG_REFERENCE.md#reasoningpolicy) · [Capability declarations](#capability-declarations) · [`/model-router-reasoning` command](#model-router-reasoning-command) · [Policy modes](#policy-modes-reasoningpolicy) · [Backward compatibility](#backward-compatibility) · [`surfaceLimits`](#surfacelimits)
 
 ---
 
@@ -23,7 +23,7 @@ The router speaks four levels. They are provider-agnostic; each tier's `capabili
 | `elevated` | Reason harder than baseline. | 2 |
 | `max` | Top available reasoning effort. | 3 |
 
-These are the only valid arguments to `/reasoning`. Anything else returns `Unknown level: "<arg>". Use one of: minimal, normal, elevated, max (or "off" to clear).`
+These are the only valid arguments to `/model-router-reasoning`. Anything else returns `Unknown level: "<arg>". Use one of: minimal, normal, elevated, max (or "off" to clear).`
 
 ---
 
@@ -33,7 +33,7 @@ Every tier carries a `capability` field. The shape determines how `translateLeve
 
 | `kind` | `field` | Behaviour | Example tier |
 |---|---|---|---|
-| `none` | _(none)_ | No reasoning control. The router never mutates the tier — `/reasoning` is a no-op for this tier. | `anthropic.fast` (Haiku), `google.*` (Gemini) |
+| `none` | _(none)_ | No reasoning control. The router never mutates the tier — `/model-router-reasoning` is a no-op for this tier. | `anthropic.fast` (Haiku), `google.*` (Gemini) |
 | `binary` | `variant` | Two-state toggle: a baseline + an elevated variant. `minimal`/`normal` map to the baseline (or `null` when no baseline is declared); `elevated`/`max` map to the elevated variant. | `multi-provider.medium` (MiniMax `thinking`), `anthropic.medium` (Sonnet `max`), `anthropic.heavy` (Opus `max`) |
 | `discrete` | `variant` | N-state ladder routed through `agentDef.variant`. Picked by nearest-rank mapping: `Math.round(rank/3 * (len-1))`. | `multi-provider.fast` (mimo `[low, medium, high]`), `openai.medium` (`[low, medium, high]`), `openai.heavy` (`[low, medium, high, xhigh]`) |
 | `discrete` | `reasoning.effort` | Same ladder, routed through `agentDef.options.reasoning_effort`. | `multi-provider.heavy` (gpt-5.4 `[low, medium, high]`) |
@@ -53,13 +53,13 @@ Given a `(capability, level)` pair, the translator emits a `ResolvedReasoning`:
 | `discrete` × _level_ | `{ variant: <picked> }` when `field === "variant"`, else `{ options: { reasoning_effort: <picked> } }` |
 | `budgeted` × _level_ | `{ options: { budget_tokens: cap.recommended[level] ?? cap.recommended.normal } }` |
 
-`null` is the canonical "no-op" sentinel. The router and the `/reasoning` command both honor it: a `null` patch is silently skipped (unless [`surfaceLimits`](#surfacelimits) is enabled, in which case a debug log + advisory note is emitted).
+`null` is the canonical "no-op" sentinel. The router and the `/model-router-reasoning` command both honor it: a `null` patch is silently skipped (unless [`surfaceLimits`](#surfacelimits) is enabled, in which case the runtime emits a debug event — see [`surfaceLimits`](#surfacelimits)).
 
 ---
 
 ## Capability declarations
 
-The bundled presets declare capability explicitly on every tier. This table is the authoritative reference for what `/reasoning` can do on each tier.
+The bundled presets declare capability explicitly on every tier. This table is the authoritative reference for what `/model-router-reasoning` can do on each tier.
 
 | Preset | Tier | Model | Capability |
 |---|---|---|---|
@@ -107,8 +107,8 @@ type ReasoningCapability =
 | Mode | Behaviour | Use it for |
 |---|---|---|
 | `static` _(default when `reasoningPolicy` is absent)_ | Always returns `null` from the policy resolver. `static` is a hard no-op: even if a session override exists, the agent def is left exactly as `registerTierAgents` produced it. | Pre-Plan-010 configs. Anyone who wants byte-identical behaviour to today. |
-| `manual` | Translates `sessionOverride ?? policy.defaultLevel` through the tier's capability. When the override is `undefined` and no `defaultLevel` is configured, returns `null` (silent no-op). | `/reasoning` driven overrides. This is the **bundled default** as of Plan 010 PR 3. |
-| `adaptive` | Stub. Returns `null`. A follow-up plan will wire an adaptive engine that picks the level based on task class / risk signals. | Not yet functional — declare it to opt in once the engine ships. |
+| `manual` | Translates `sessionOverride ?? policy.defaultLevel` through the tier's capability. When the override is `undefined` and no `defaultLevel` is configured, returns `null` (silent no-op). | `/model-router-reasoning` driven overrides. This is the **bundled default** as of Plan 010 PR 3, and the **only mode this release ships with runtime mode switching**. |
+| `adaptive` | **Deferred.** The mode name is reserved in the type union and `applyStateOverlay` rejects it at the config-overlay boundary. No adaptive engine exists yet, and `/model-router-reasoning mode adaptive` is rejected with a clear "not implemented yet" message. | Do not use today. When the engine ships, `/model-router-reasoning mode adaptive` will accept the value and a follow-up plan will document the routing signals. |
 
 `surfaceLimits` defaults to `false`. See [below](#surfacelimits).
 
@@ -123,31 +123,50 @@ type ReasoningCapability =
 }
 ```
 
-Because `surfaceLimits` is `false`, the default behaviour is silent: a `/reasoning minimal` call on a `none`-capability tier produces a confirmation in the chat but does not mutate the agent def or emit any plugin log. Only an explicit `surfaceLimits: true` changes this.
+Because `surfaceLimits` is `false`, the default behaviour is silent: a `/model-router-reasoning minimal` call on a `none`-capability tier produces a confirmation in the chat but does not mutate the agent def or emit any plugin log. Only an explicit `surfaceLimits: true` changes this.
 
 To restore the pre-Plan-010 byte-identical behaviour, set `reasoningPolicy.mode` to `"static"`.
 
+### Persisted policy-mode switching
+
+The bundled default of `manual` mode is fine for most users, but operators who need to flip the runtime between override-driven and static behaviour without restarting OpenCode can persist a new mode through the router state overlay:
+
+```bash
+/model-router-reasoning mode manual   # enables per-session override flow (default)
+/model-router-reasoning mode static   # disables it; tiers render at their declared baseline
+/model-router-reasoning mode adaptive # rejected — see the adaptive row above
+```
+
+The `mode` subcommand writes `reasoningMode` into the router state overlay via `saveReasoningMode()`, which is the same persistence path used by `/router enforce`. The next config refresh — the one the `command.execute.before` hook calls through `getFreshConfig()` — picks the new mode up and honors it on the next `task` dispatch. There is no per-session override for the policy mode; the value is global to the workspace.
+
 ---
 
-## `/reasoning` command
+## `/model-router-reasoning` command
 
-The `/reasoning` command is the user-facing entry point. It validates against the four normalized levels plus `off`, sets/clears the session override on `ctx.reasoningStore`, and prints a per-tier acknowledgement describing what each active tier will do.
+The `/model-router-reasoning` command is the user-facing entry point. It has two distinct surfaces, separated by the `mode` subcommand:
+
+- **Level overrides** (`minimal` / `normal` / `elevated` / `max` / `off`) set a **session-scoped** override on `ctx.reasoningStore`. The override applies to the next `task` dispatch in this session only and is cleared by `off`.
+- **Mode switching** (`mode static` / `mode manual`) **persists** a new policy-mode value through the router state overlay (`saveReasoningMode`). The change is global to the workspace and survives restarts — it is NOT session-scoped.
 
 ### Usage
 
 | Form | Effect |
 |---|---|
-| `/reasoning` _(no args)_ | Print policy mode + per-tier capability descriptions. |
-| `/reasoning minimal` | Set session override to `minimal`. |
-| `/reasoning normal` | Set session override to `normal`. |
-| `/reasoning elevated` | Set session override to `elevated`. |
-| `/reasoning max` | Set session override to `max`. |
-| `/reasoning off` | Clear the session override. |
-| `/reasoning foo` | Reject: `Unknown level: "foo". Use one of: minimal, normal, elevated, max (or "off" to clear).` |
+| `/model-router-reasoning` _(no args)_ | Print policy mode + per-tier capability descriptions. |
+| `/model-router-reasoning minimal` | Set session override to `minimal`. |
+| `/model-router-reasoning normal` | Set session override to `normal`. |
+| `/model-router-reasoning elevated` | Set session override to `elevated`. |
+| `/model-router-reasoning max` | Set session override to `max`. |
+| `/model-router-reasoning off` | Clear the session override. |
+| `/model-router-reasoning mode` | Print the current persisted policy mode + usage. |
+| `/model-router-reasoning mode static` | **Persist** `mode: "static"` to the state overlay; takes effect on the next config refresh. |
+| `/model-router-reasoning mode manual` | **Persist** `mode: "manual"` to the state overlay; takes effect on the next config refresh. |
+| `/model-router-reasoning mode adaptive` | Reject: `adaptive is not implemented yet.` See [Policy modes](#policy-modes-reasoningpolicy). |
+| `/model-router-reasoning foo` | Reject: `Unknown level: "foo". Use one of: minimal, normal, elevated, max (or "off" to clear). Run '/model-router-reasoning mode' to switch the policy.` |
 
-The override applies to the **next `task` dispatch in this session only**. The runtime hooks restore the baseline tier config in `tool.execute.after`, so a session override does not leak to subsequent dispatches or to other sessions.
+The level override applies to the **next `task` dispatch in this session only**. The runtime hooks restore the baseline tier config in `tool.execute.after`, so a session override does not leak to subsequent dispatches or to other sessions. The persisted mode, by contrast, applies to every dispatch that loads the config from that point on — until another `mode` call (or a manual edit to the state file) changes it again.
 
-### Example output (`/reasoning elevated`)
+### Example output (`/model-router-reasoning elevated`)
 
 ```
 Reasoning override set to **elevated** for this session.
@@ -168,10 +187,20 @@ With `surfaceLimits: true`, the output also flags collapses:
   — surface the limit by enabling reasoningPolicy.surfaceLimits.
 ```
 
+### Example output (`/model-router-reasoning mode manual`)
+
+```
+Reasoning policy mode set to **manual** and persisted.
+
+Per-session overrides are enabled — `/model-router-reasoning minimal|normal|elevated|max` will take effect on the next task dispatch.
+
+Takes effect on the next config refresh.
+```
+
 ### How the override is applied
 
 ```
-/reasoning elevated
+/model-router-reasoning elevated
   -> command.execute.before (sessionID threaded through runtime)
   -> reasoningStore.set(sessionID, "elevated")
 
@@ -181,10 +210,15 @@ Task(subagent_type="medium")
   -> applyReasoningPatch(liveAgent, resolved)
   -> task spawns child with patched agent config
   -> tool.execute.after restores baseline tier config
-  -> optional pending note emitted when surfaceLimits=true
+  -> same-tier overlap is skipped, not double-patched (see Same-tier in-flight guard below)
+  -> runtime emits a log.debug event when surfaceLimits=true (see surfaceLimits)
 ```
 
 `tool.execute.after` always restores from the `structuredClone` baseline captured at `handleConfig` time, so concurrent unrelated dispatches on different tiers never see each other's state.
+
+### Same-tier in-flight guard
+
+The reasoning store tracks one owner per tier (the sessionID currently holding the patch lock for that tier). A second same-tier dispatch observes `acquireTierOwner` returning `false` and **skips the patch** rather than overwriting an in-flight one. The skipped dispatch emits the debug event `reasoning.patch_skipped_concurrent` with the current owner, so the reason the patch was suppressed is observable without leaking into the chat. The after-hook releases ownership only when the current session is still the owner, so a foreign after-hook cannot drop another session's lock.
 
 ---
 
@@ -198,7 +232,7 @@ Plan 010 is fully backward-compatible with every config shipped before it.
 | No `capability` on a tier | `inferCapability(tier)` walks `reasoning.effort`, `thinking.budgetTokens`, then `variant` (positional vs named split) and returns the inferred shape. Existing tier fields are the source of truth. |
 | Explicit `capability` on a tier | Authoritative. Inference is skipped. The translator uses the declared `field` and `levels`/`baseline`/`elevated`/`recommended`. |
 
-The default in the **bundled** `base.json` is now `manual` mode (so `/reasoning` works out of the box). User-supplied `global` / `local` tiers.json layers can override it back to `static` to keep pre-Plan-010 behaviour verbatim.
+The default in the **bundled** `base.json` is now `manual` mode (so `/model-router-reasoning` works out of the box). User-supplied `global` / `local` tiers.json layers can override it back to `static` to keep pre-Plan-010 behaviour verbatim.
 
 ### Inference rules
 
@@ -216,12 +250,14 @@ Inference is intentionally narrow: it cannot silently invent behaviour. Tiers th
 
 ## `surfaceLimits`
 
-`surfaceLimits` is an opt-in presentation flag. It does NOT change which patches are emitted — surfacing is purely a presentation concern owned by the `/reasoning` command and the runtime log layer.
+`surfaceLimits` is an opt-in presentation flag. It does NOT change which patches are emitted — surfacing is purely a presentation concern owned by the `/model-router-reasoning` command and the runtime log layer.
 
 | Value | Effect |
 |---|---|
-| `false` _(bundled default)_ | Silent no-op when a tier cannot satisfy the requested level. The `/reasoning` command still prints the success line, but per-tier skip/collapse notes are omitted. |
-| `true` | When a tier's capability cannot satisfy the requested level, the `/reasoning` output flags it (`- @<tier>: unsupported (no reasoning control).`) and collapse-on-coarse-ladder notes are expanded. The runtime also emits a debug log via the `tool.execute.after` hook. |
+| `false` _(bundled default)_ | Silent no-op when a tier cannot satisfy the requested level. The `/model-router-reasoning` command still prints the success line, but per-tier skip/collapse notes are omitted and the runtime does not emit any reasoning-related debug events. |
+| `true` | When a tier's capability cannot satisfy the requested level, the `/model-router-reasoning` output flags it (`- @<tier>: unsupported (no reasoning control).`) and collapse-on-coarse-ladder notes are expanded. The runtime emits `log.debug` events keyed by `event` so operators can correlate what each dispatch did: `reasoning.patch_applied` (a patch landed), `reasoning.patch_unsupported` (an override resolved to `null`), and `reasoning.patch_skipped_concurrent` (a same-tier overlap was skipped — see [Same-tier in-flight guard](#same-tier-in-flight-guard)). |
+
+Surfacing is observability, not a user-facing message: the debug events never appear in the chat, they only show up in the plugin log. There is no advisory "pending note" path — that plumbing was removed in Plan 014 because nothing consumed it.
 
 Set `surfaceLimits: true` while you are triaging a new tier or a new override; leave it `false` for production.
 
@@ -240,15 +276,15 @@ Set `surfaceLimits: true` while you are triaging a new tier or a new override; l
 | `elevated` | 2 | `round(2/3 * 2)` = `round(1.333)` = 1 | `medium` ← collapse |
 | `max` | 3 | `round(3/3 * 2)` = 2 | `high` |
 
-`/reasoning elevated` and `/reasoning normal` produce the **same patch** on `multi-provider.fast` (mimo's 3-level ladder). 4-level ladders (`[low, medium, high, xhigh]`) do not collapse.
+`/model-router-reasoning elevated` and `/model-router-reasoning normal` produce the **same patch** on `multi-provider.fast` (mimo's 3-level ladder). 4-level ladders (`[low, medium, high, xhigh]`) do not collapse.
 
-The collapse is intentional: it matches the discrete-ladder spec. The `/reasoning` command surfaces it (under `surfaceLimits`) so users are not surprised by the same `variant` for two different requested levels. 2-level ladders behave correctly because `Math.min(rawIdx, len-1)` clamps; 4+ level ladders have one rung per normalized level.
+The collapse is intentional: it matches the discrete-ladder spec. The `/model-router-reasoning` command surfaces it (under `surfaceLimits`) so users are not surprised by the same `variant` for two different requested levels. 2-level ladders behave correctly because `Math.min(rawIdx, len-1)` clamps; 4+ level ladders have one rung per normalized level.
 
 ### Other limitations
 
 - `budgeted` capability is supported by the translator but **not declared** on any bundled tier today. Declaring it on a tier requires both `field: "thinking.budgetTokens"` and a `recommended` map covering all four normalized levels.
-- The bundled default mode is `manual`, which means `/reasoning` works out of the box. Set `reasoningPolicy.mode` to `static` to restore the pre-Plan-010 byte-identical behaviour.
-- The `adaptive` mode is a stub. Returning `null` from the policy resolver is the documented behaviour; the follow-up plan will wire an adaptive engine.
+- The bundled default mode is `manual`, which means `/model-router-reasoning` works out of the box. Set `reasoningPolicy.mode` to `static` to restore the pre-Plan-010 byte-identical behaviour.
+- The `adaptive` mode is **deferred in this release**. It is reserved in the type union, the state overlay rejects it at the boundary, and `/model-router-reasoning mode adaptive` is rejected with a clear "not implemented yet" message. The production release ships **manual-mode reasoning control only**. A follow-up plan will introduce the adaptive engine and the routing signals it consumes.
 
 ---
 
@@ -262,7 +298,7 @@ Per [plans/010-adaptive-reasoning.md](../../plans/010-adaptive-reasoning.md):
 | Unit — translation | `test/unit/reasoning-translate.test.ts` — every capability × level; `none` always `null`; 2-level discrete clamping; field routing. |
 | Unit — policy | `test/unit/reasoning-policy.test.ts` — `static` ALWAYS null; `manual`+override applies; `surfaceLimits` does NOT alter resolved patch. |
 | Unit — agent wiring | `test/unit/router-agents.test.ts` — `applyReasoningPatch` + `restoreAgentBaseline` round-trip; `none`-capability NEVER mutated. |
-| Unit — command | `test/unit/router-commands.test.ts` — `/reasoning` validates level, sets/clears store, names capability. |
+| Unit — command | `test/unit/router-commands.test.ts` — `/model-router-reasoning` validates level, persists `mode`, rejects `adaptive`, sets/clears store, names capability. |
 | Unit — hooks | `test/unit/plugin-hooks.test.ts` — `handleConfig` captures baseline; `tool.execute.before/after` patch/restore. |
 
 Run:

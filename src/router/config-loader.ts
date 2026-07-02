@@ -220,10 +220,23 @@ export const deepMergeConfig = (base: unknown, override: unknown): unknown => {
 // ---------------------------------------------------------------------------
 
 /**
+ * Narrow type guard for the persisted `reasoningMode` overlay. The overlay
+ * deliberately excludes `adaptive` — adaptive mode is not implemented yet and
+ * the command surface rejects it explicitly. Keeping the overlay narrowed to
+ * `static | manual` means a stale or hand-edited state file with
+ * `reasoningMode: "adaptive"` is ignored instead of leaking through.
+ */
+const REASONING_PERSISTED_MODES = ["static", "manual"] as const;
+const isValidReasoningMode = (v: unknown): v is (typeof REASONING_PERSISTED_MODES)[number] => {
+  return typeof v === "string" && (REASONING_PERSISTED_MODES as readonly string[]).includes(v);
+};
+
+/**
  * Narrow state overlay. Writes ONLY:
  * - `state.activePreset` → `cfg.activePreset` when `resolvePresetName()` succeeds
  * - `state.activeMode`   → `cfg.activeMode` when the mode exists in `cfg.modes`
  * - `state.enforcementMode` → `cfg.enforcement.mode`, creating `cfg.enforcement` if missing
+ * - `state.reasoningMode` → `cfg.reasoningPolicy.mode`, creating `cfg.reasoningPolicy` if missing
  * All other manual fields are preserved unchanged.
  *
  * Exported for `src/router/config-store.ts`; mutates `cfg` in place but has
@@ -241,6 +254,12 @@ export const applyStateOverlay = (cfg: RouterConfig, state: RouterState): void =
   }
   if (state.enforcementMode && isValidEnforcementMode(state.enforcementMode)) {
     cfg.enforcement = { ...(cfg.enforcement ?? {}), mode: state.enforcementMode };
+  }
+  if (state.reasoningMode && isValidReasoningMode(state.reasoningMode)) {
+    cfg.reasoningPolicy = {
+      ...(cfg.reasoningPolicy ?? {}),
+      mode: state.reasoningMode,
+    };
   }
 };
 

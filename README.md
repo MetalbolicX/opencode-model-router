@@ -612,7 +612,7 @@ Applies to all models, not only Claude — but the prompt-level clause is Claude
 
 ### Reasoning control
 
-Per-tier reasoning is now configurable at runtime via the `/reasoning` command and an optional `reasoningPolicy` block in `tiers.json`. See [docs/REASONING.md](./docs/REASONING.md) for the full capability model, normalized level vocabulary, translation rules, and the documented 3-level-ladder collapse quirk.
+Per-tier reasoning is now configurable at runtime via the `/model-router-reasoning` command and an optional `reasoningPolicy` block in `tiers.json`. See [docs/REASONING.md](./docs/REASONING.md) for the full capability model, normalized level vocabulary, translation rules, and the documented 3-level-ladder collapse quirk.
 
 Minimal example:
 
