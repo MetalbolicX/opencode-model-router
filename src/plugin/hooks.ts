@@ -93,6 +93,85 @@ export const handleToolExecuteBefore = async (
   if (ctx.state.bypassed) return;
   const sid = input?.sessionID as string | undefined;
   const tool = input?.tool as string | undefined;
+
+  // PR 2 of adaptive-reasoning: resolve the per-session override and patch
+  // the targeted tier agent on the live `opencodeConfig` BEFORE the task
+  // call spawns its child session. The patch lasts only for the duration
+  // of the tool call; `handleToolExecuteAfter` restores the baseline once
+  // the task returns.
+  //
+  // This block must run for the ORCHESTRATOR (the only session that calls
+  // the built-in `task` tool to dispatch subagents). It is gated by
+  // `!isSubagent(sid)` so it cannot fire for subagent sessions — those
+  // are blocked at the nested-task guard below.
+  //
+  // Reads:
+  //   - `ctx.reasoningStore.getOverride(sid)` — session override from /reasoning
+  //   - `cfg.reasoningPolicy` — mode + defaultLevel + surfaceLimits
+  //   - `ctx.opencodeConfig.agent[tierName]` — the agent def to mutate
+  //
+  // The patch is a no-op when:
+  //   - tool is not `task` (the only tool that reads a tier agent by name)
+  //   - subagent_type is absent or not in the active preset
+  //   - no override is set AND no defaultLevel is configured
+  //   - policy mode is `static` (primary regression guard)
+  //   - the resolved patch is `null` (e.g. `none` capability, or `manual`
+  //     with no level)
+  if (sid && tool === "task" && !ctx.sessionStore.isSubagent(sid)) {
+    if (ctx.opencodeConfig?.agent) {
+      try {
+        const subagentType = (output?.args as Record<string, unknown> | undefined)?.subagent_type as
+          | string
+          | undefined;
+        const agentDef = subagentType ? ctx.opencodeConfig.agent[subagentType] : undefined;
+        if (subagentType && agentDef) {
+          const cfg = await ctx.getConfig();
+          const tiers = getActiveTiers(cfg);
+          const tier = tiers[subagentType];
+          if (tier) {
+            const override = ctx.reasoningStore.getOverride(sid);
+            const resolved = resolveReasoningOverride(tier, cfg.reasoningPolicy, override);
+            if (resolved) {
+              applyReasoningPatch(agentDef, resolved);
+              // Surface-only advisory: emit a debug log when the policy opted in
+              // to surfacing limits AND the resolved patch carries the
+              // documented 3-level-ladder collapse quirk.
+              if (cfg.reasoningPolicy?.surfaceLimits === true) {
+                log.debug({
+                  event: "reasoning.patch_applied",
+                  session: sid,
+                  tier: subagentType,
+                  override: override ?? cfg.reasoningPolicy?.defaultLevel ?? null,
+                  patch: resolved,
+                });
+              }
+            } else if (override && cfg.reasoningPolicy?.surfaceLimits === true) {
+              // Override was set but resolved to null — log so operators can
+              // see why the requested level wasn't applied.
+              log.debug({
+                event: "reasoning.patch_unsupported",
+                session: sid,
+                tier: subagentType,
+                override,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        // best-effort: a reasoning patch failure must never block the task.
+        log.warn({
+          event: "reasoning.patch_failed",
+          session: sid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    // Orchestrator task calls never need the guard evaluation that follows
+    // (the guard is subagent-only — see ADR 0001). Return so we don't fall
+    // through into the subagent guard path.
+    return;
+  }
+
   if (!sid || !ctx.sessionStore.isSubagent(sid) || typeof tool !== "string") {
     return;
   }
@@ -107,73 +186,6 @@ export const handleToolExecuteBefore = async (
     throw new Error(
       "Nested subagent delegation is not allowed: subagent sessions cannot call the built-in task tool",
     );
-  }
-
-  // PR 2 of adaptive-reasoning: resolve the per-session override and patch
-  // the targeted tier agent on the live `opencodeConfig` BEFORE the task
-  // call spawns its child session. The patch lasts only for the duration
-  // of the tool call; `handleToolExecuteAfter` restores the baseline once
-  // the task returns.
-  //
-  // Reads:
-  //   - `ctx.reasoningStore.getOverride(sid)` — session override from /reasoning
-  //   - `cfg.reasoningPolicy` — mode + defaultLevel + surfaceLimits
-  //   - `ctx.opencodeConfig.agent[tierName]` — the agent def to mutate
-  //
-  // The patch is a no-op when:
-  //   - tool is not `task` (the only tool that reads a tier agent by name)
-  //   - subagent_type is absent or not in the active preset
-  //   - no override is set AND no defaultLevel is configured
-  //   - policy mode is `static` (primary regression guard)
-  //   - the resolved patch is `null` (e.g. `none` capability, or `manual`
-  //     with no level)
-  if (tool === "task" && ctx.opencodeConfig?.agent) {
-    try {
-      const subagentType = (output?.args as Record<string, unknown> | undefined)?.subagent_type as
-        | string
-        | undefined;
-      const agentDef = subagentType ? ctx.opencodeConfig.agent[subagentType] : undefined;
-      if (subagentType && agentDef) {
-        const cfg = await ctx.getConfig();
-        const tiers = getActiveTiers(cfg);
-        const tier = tiers[subagentType];
-        if (tier) {
-          const override = ctx.reasoningStore.getOverride(sid);
-          const resolved = resolveReasoningOverride(tier, cfg.reasoningPolicy, override);
-          if (resolved) {
-            applyReasoningPatch(agentDef, resolved);
-            // Surface-only advisory: emit a debug log when the policy opted in
-            // to surfacing limits AND the resolved patch carries the
-            // documented 3-level-ladder collapse quirk.
-            if (cfg.reasoningPolicy?.surfaceLimits === true) {
-              log.debug({
-                event: "reasoning.patch_applied",
-                session: sid,
-                tier: subagentType,
-                override: override ?? cfg.reasoningPolicy?.defaultLevel ?? null,
-                patch: resolved,
-              });
-            }
-          } else if (override && cfg.reasoningPolicy?.surfaceLimits === true) {
-            // Override was set but resolved to null — log so operators can
-            // see why the requested level wasn't applied.
-            log.debug({
-              event: "reasoning.patch_unsupported",
-              session: sid,
-              tier: subagentType,
-              override,
-            });
-          }
-        }
-      }
-    } catch (err) {
-      // best-effort: a reasoning patch failure must never block the task.
-      log.warn({
-        event: "reasoning.patch_failed",
-        session: sid,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
   }
 
   let res: BeforeResult;
