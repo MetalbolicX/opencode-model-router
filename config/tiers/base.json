@@ -9,6 +9,16 @@
   "defaultTier": "medium",
   "reasoningPolicy": {
     "mode": "manual",
-    "surfaceLimits": false
+    "surfaceLimits": false,
+    "adaptive": {
+      "trivialLevel": null,
+      "defaultLevel": "normal",
+      "keywordRules": [
+        { "keywords": ["refactor", "architecture", "security", "migration"], "level": "elevated" },
+        { "keywords": ["debug", "diagnose", "investigate", "root cause"], "level": "elevated" },
+        { "keywords": ["test", "fix", "patch"], "level": "normal" }
+      ],
+      "surfaceDecision": false
+    }
   }
 }

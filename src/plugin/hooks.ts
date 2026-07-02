@@ -18,6 +18,7 @@ import {
   guardBeforeCall,
 } from "../guard/enforce";
 import { detectNarration } from "../guard/narration";
+import { type AdaptiveSignals, selectAdaptiveLevel } from "../reasoning/adaptive.js";
 import { resolveReasoningOverride } from "../reasoning/policy.js";
 import { applyReasoningPatch, registerTierAgents, restoreAgentBaseline } from "../router/agents";
 import { registerRouterCommands } from "../router/commands";
@@ -30,7 +31,7 @@ import { log } from "../utils/observability";
 import { verifyTaskAfterHook } from "../verify/dispatch";
 import type { PluginContext } from "./context";
 import type { HookEventPayload, HookPayload } from "./types";
-import { asChatMessageInput, asToolCallInput } from "./types";
+import { asChatMessageInput, asTaskToolArgs, asToolCallInput } from "./types";
 
 // ---------------------------------------------------------------------------
 // chat.params — temperature override for open grader sessions.
@@ -124,9 +125,10 @@ export const handleToolExecuteBefore = async (
   if (sid && tool === "task" && !ctx.sessionStore.isSubagent(sid)) {
     if (ctx.opencodeConfig?.agent) {
       try {
-        const subagentType = (output?.args as Record<string, unknown> | undefined)?.subagent_type as
-          | string
-          | undefined;
+        const taskArgs = asTaskToolArgs(output?.args);
+        const subagentType = taskArgs?.subagent_type;
+        const prompt = taskArgs?.prompt ?? "";
+        const description = taskArgs?.description ?? "";
         const agentDef = subagentType ? ctx.opencodeConfig.agent[subagentType] : undefined;
         if (subagentType && agentDef) {
           const cfg = await ctx.getConfig();
@@ -149,17 +151,17 @@ export const handleToolExecuteBefore = async (
               return;
             }
             const override = ctx.reasoningStore.getOverride(sid);
-            const resolved = resolveReasoningOverride(tier, cfg.reasoningPolicy, override, {
-              // Phase 2 placeholder: real prompt/description threading from
-              // asTaskToolArgs lands in Phase 3. Empty strings are safe — the
-              // selector's keyword step is a substring match against empty
-              // haystacks and simply finds nothing, so non-trivial calls
-              // fall through to tierDefaults / defaultLevel.
-              prompt: "",
-              description: "",
+            // PR 3 of adaptive-reasoning: thread the real Task-tool prompt +
+            // description into the selector. Both are lowercased here so the
+            // selector's keyword step is a cheap case-insensitive substring
+            // match against already-normalised text.
+            const signals: AdaptiveSignals = {
+              prompt: prompt.toLowerCase(),
+              description: description.toLowerCase(),
               tierName: subagentType,
               isTrivial: ctx.sessionStore.isTrivial(sid),
-            });
+            };
+            const resolved = resolveReasoningOverride(tier, cfg.reasoningPolicy, override, signals);
             if (resolved) {
               applyReasoningPatch(agentDef, resolved);
               // Surface-only advisory: emit a debug log when the policy opted in
@@ -182,6 +184,27 @@ export const handleToolExecuteBefore = async (
                 session: sid,
                 tier: subagentType,
                 override,
+              });
+            }
+            // PR 3 of adaptive-reasoning: when the policy opted in to surface
+            // adaptive decisions, emit a debug event carrying the selector's
+            // pure decision (level + reason) on every dispatch under adaptive
+            // mode. Independent from `surfaceLimits` — that flag controls
+            // patch_applied / patch_unsupported. The selector is pure so this
+            // re-evaluation is cheap; we keep it separate from the resolver's
+            // call so the event payload stays machine-friendly (level + reason
+            // string, not the translated patch).
+            if (
+              cfg.reasoningPolicy?.mode === "adaptive" &&
+              cfg.reasoningPolicy?.adaptive?.surfaceDecision === true
+            ) {
+              const decision = selectAdaptiveLevel(signals, cfg.reasoningPolicy);
+              log.debug({
+                event: "reasoning.adaptive_selected",
+                session: sid,
+                tier: subagentType,
+                level: decision.level,
+                reason: decision.reason,
               });
             }
           }

@@ -449,15 +449,19 @@ describe("buildReasoningOutput", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildReasoningOutput — `mode` subcommand", () => {
-  it("`mode` (no arg) shows current mode + usage for static and manual + adaptive note", async () => {
+  it("`mode` (no arg) shows current mode + usage for static, manual, and adaptive", async () => {
     const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
     const out = await buildReasoningOutput(cfg, "mode", makeReasoningCtx(cfg), "sess-1");
     expect(out).toContain("Current reasoning policy mode: **manual**");
-    expect(out).toContain("Usage: `/model-router-reasoning mode <static|manual>`");
+    expect(out).toContain("Usage: `/model-router-reasoning mode <static|manual|adaptive>`");
     expect(out).toContain("`static`");
     expect(out).toContain("`manual`");
-    expect(out).toContain("adaptive");
-    expect(out).toContain("not implemented");
+    // Adaptive is implemented: the usage block describes the selector rather
+    // than rejecting the value. The wording in the help/usage block is
+    // `\`adaptive\` picks a level from task signals ...`.
+    expect(out).toContain("`adaptive`");
+    expect(out).toContain("picks a level from task signals");
+    expect(out).not.toContain("not implemented");
   });
 
   it("`mode` (no arg) reports the default 'static' when no policy is configured", async () => {
@@ -484,14 +488,15 @@ describe("buildReasoningOutput — `mode` subcommand", () => {
     expect(state.reasoningMode).toBe("manual");
   });
 
-  it("`mode adaptive` is rejected clearly as not implemented", async () => {
+  it("`mode adaptive` is accepted and persisted (PR 3 wires the selector)", async () => {
     const cfg = makeConfig({ reasoningPolicy: { mode: "static" } });
     const out = await buildReasoningOutput(cfg, "mode adaptive", makeReasoningCtx(cfg), "sess-1");
-    expect(out).toContain("adaptive");
-    expect(out).toContain("not implemented");
-    // Verify no state was written — adaptive must not leak into the overlay.
+    expect(out).toContain("Reasoning policy mode set to **adaptive** and persisted");
+    expect(out).toContain("Adaptive selector picks the level from task signals");
+    expect(out).not.toContain("not implemented");
+    // Verify adaptive DID write through to the state overlay.
     const state = await readState();
-    expect(state.reasoningMode).toBeUndefined();
+    expect(state.reasoningMode).toBe("adaptive");
   });
 
   it("`mode <unknown>` is rejected with a clear error", async () => {
@@ -505,7 +510,7 @@ describe("buildReasoningOutput — `mode` subcommand", () => {
     const cfg = makeConfig({ reasoningPolicy: { mode: "manual" } });
     const out = await buildReasoningOutput(cfg, "", makeReasoningCtx(cfg), "sess-1");
     expect(out).toContain("Switch persisted policy mode");
-    expect(out).toContain("/model-router-reasoning mode <static|manual>");
+    expect(out).toContain("/model-router-reasoning mode <static|manual|adaptive>");
   });
 });
 
@@ -556,7 +561,7 @@ describe("handleCommandBefore — /model-router-reasoning branch", () => {
     expect(state.reasoningMode).toBe("static");
   });
 
-  it("/model-router-reasoning mode adaptive dispatches and is rejected", async () => {
+  it("/model-router-reasoning mode adaptive dispatches and is persisted", async () => {
     const cfg = makeConfig({ reasoningPolicy: { mode: "static" } });
     const ctx = makeReasoningCtx(cfg);
     const output: { parts: any[] } = { parts: [] };
@@ -565,8 +570,12 @@ describe("handleCommandBefore — /model-router-reasoning branch", () => {
       { command: "model-router-reasoning", arguments: "mode adaptive", sessionID: "sess-cmd" },
       output,
     );
-    expect(output.parts[0].text).toContain("not implemented");
+    expect(output.parts).toHaveLength(1);
+    expect(output.parts[0].text).toContain(
+      "Reasoning policy mode set to **adaptive** and persisted",
+    );
+    expect(output.parts[0].text).not.toContain("not implemented");
     const state = await readState();
-    expect(state.reasoningMode).toBeUndefined();
+    expect(state.reasoningMode).toBe("adaptive");
   });
 });

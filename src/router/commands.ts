@@ -183,13 +183,12 @@ export const buildPresetOutput = async (cfg: RouterConfig, args: string): Promis
 };
 
 // ---------------------------------------------------------------------------
-// /model-router-reasoning command output (PR 2 of model-router-reasoning-mode-switch).
+// /model-router-reasoning command output (PR 3 of adaptive-reasoning-engine).
 //
 // Two responsibilities, parsed from the first token:
-//   1. `mode <static|manual>` — persist a runtime policy-mode switch via
-//      `saveReasoningMode()`. `adaptive` is explicitly rejected (not
-//      implemented yet). With no mode argument, show the current mode and
-//      usage. This is a PERSISTED config overlay that survives restarts.
+//   1. `mode <static|manual|adaptive>` — persist a runtime policy-mode switch
+//      via `saveReasoningMode()`. With no mode argument, show the current mode
+//      and usage. This is a PERSISTED config overlay that survives restarts.
 //   2. `<level>` (one of `minimal|normal|elevated|max`, or `off`) — set /
 //      clear the per-session override on `ctx.reasoningStore`. The override
 //      is stored regardless of the current policy mode; whether the runtime
@@ -288,7 +287,7 @@ export const buildReasoningOutput = async (
     lines.push(
       "",
       "Set per-session override: `/model-router-reasoning minimal|normal|elevated|max`. Clear with `/model-router-reasoning off`.",
-      "Switch persisted policy mode: `/model-router-reasoning mode <static|manual>`.",
+      "Switch persisted policy mode: `/model-router-reasoning mode <static|manual|adaptive>`.",
       "Applies to the next `task` dispatch in this session only.",
     );
     return lines.join("\n");
@@ -301,34 +300,29 @@ export const buildReasoningOutput = async (
       return [
         `Current reasoning policy mode: **${policyMode}**`,
         "",
-        "Usage: `/model-router-reasoning mode <static|manual>`",
+        "Usage: `/model-router-reasoning mode <static|manual|adaptive>`",
         "`static` uses each tier's default reasoning level.",
         "`manual` enables per-session overrides via `minimal|normal|elevated|max`.",
-        "",
-        "Note: `adaptive` is not implemented yet.",
+        "`adaptive` picks a level from task signals (prompt + description + tier + trivial flag) via `reasoningPolicy.adaptive`.",
       ].join("\n");
     }
-    if (modeArg === "static" || modeArg === "manual") {
+    if (modeArg === "static" || modeArg === "manual" || modeArg === "adaptive") {
       await saveReasoningMode(modeArg);
+      const desc =
+        modeArg === "static"
+          ? "Per-tier defaults are in effect — per-session overrides are ignored at task dispatch."
+          : modeArg === "manual"
+            ? "Per-session overrides are enabled — `/model-router-reasoning minimal|normal|elevated|max` will take effect on the next task dispatch."
+            : "Adaptive selector picks the level from task signals (prompt + description + tier + trivial flag). Per-session overrides still win when set. Tune `reasoningPolicy.adaptive` (keywordRules, tierDefaults, defaultLevel) to taste.";
       return [
         `Reasoning policy mode set to **${modeArg}** and persisted.`,
         "",
-        modeArg === "static"
-          ? "Per-tier defaults are in effect — per-session overrides are ignored at task dispatch."
-          : "Per-session overrides are enabled — `/model-router-reasoning minimal|normal|elevated|max` will take effect on the next task dispatch.",
+        desc,
         "",
         "Takes effect on the next config refresh.",
       ].join("\n");
     }
-    if (modeArg === "adaptive") {
-      return [
-        "**adaptive** is not implemented yet.",
-        "",
-        "Available modes: `static`, `manual`.",
-        "When the adaptive engine ships, this command will accept `adaptive` as a value.",
-      ].join("\n");
-    }
-    return `Unknown mode: "${modeArg}". Use one of: static, manual (or run '/model-router-reasoning mode' for the current value).`;
+    return `Unknown mode: "${modeArg}". Use one of: static, manual, adaptive (or run '/model-router-reasoning mode' for the current value).`;
   }
 
   // --- per-session override flow (minimal|normal|elevated|max|off) ---
@@ -470,7 +464,7 @@ export const registerRouterCommands = (opencodeConfig: {
   opencodeConfig.command["model-router-reasoning"] = {
     template: "$ARGUMENTS",
     description:
-      "Reasoning control: /model-router-reasoning mode <static|manual> (persists) | /model-router-reasoning minimal|normal|elevated|max (set) | /model-router-reasoning off (clear)",
+      "Reasoning control: /model-router-reasoning mode <static|manual|adaptive> (persists) | /model-router-reasoning minimal|normal|elevated|max (set) | /model-router-reasoning off (clear)",
   };
 };
 
