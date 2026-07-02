@@ -21,8 +21,8 @@ and update your row when done.
 | 008  | Block nested built-in Task delegation from subagents | P1 | S | LOW | — | DONE |
 | 009  | TUI plugin to restore parent session on child deletion | P1 | M | MED | — | TODO |
 | 010  | Adaptive, provider-agnostic reasoning control | P1 | L | MED | — | IN PROGRESS (PR 1 + PR 2 + PR 3 ready on stacked branches) |
-| 011  | Restore a trustworthy local verification baseline | P1 | M | LOW | — | TODO |
-| 012  | Make manual reasoning overrides actually patch task dispatch | P1 | S | MED | 011 | TODO |
+| 011  | Restore a trustworthy local verification baseline | P1 | M | LOW | — | DONE |
+| 012  | Make manual reasoning overrides actually patch task dispatch | P1 | S | MED | 011 | DONE |
 | 013  | Add an automated CI gate for typecheck, lint, tests, and build | P1 | S | LOW | 011 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale).
