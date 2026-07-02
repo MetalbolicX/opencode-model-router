@@ -11,6 +11,7 @@ import {
   saveActiveMode,
   saveActivePreset,
   saveEnforcementMode,
+  saveReasoningMode,
 } from "../../src/router/config";
 import { readMergedConfig } from "../../src/router/config-loader";
 import { createConfigStore } from "../../src/router/config-store";
@@ -147,6 +148,33 @@ describe("saveEnforcementMode", () => {
     await saveEnforcementMode("enforced");
     const s = await readState();
     expect(s.activePreset).toBeUndefined();
+  });
+});
+
+describe("saveReasoningMode", () => {
+  it("persists 'static' to state", async () => {
+    await saveReasoningMode("static");
+    const s = await readState();
+    expect(s.reasoningMode).toBe("static");
+  });
+
+  it("persists 'manual' to state", async () => {
+    await saveReasoningMode("manual");
+    const s = await readState();
+    expect(s.reasoningMode).toBe("manual");
+  });
+
+  it("overwrites a previously-persisted reasoning mode", async () => {
+    await saveReasoningMode("static");
+    await saveReasoningMode("manual");
+    const s = await readState();
+    expect(s.reasoningMode).toBe("manual");
+  });
+
+  it("does not affect the enforcementMode key on the state file", async () => {
+    await saveReasoningMode("manual");
+    const s = await readState();
+    expect(s.enforcementMode).toBeUndefined();
   });
 });
 
@@ -504,6 +532,65 @@ describe("Layered config — state overlay", () => {
     );
     const cfg = await readMergedConfig({ cwd: process.cwd() });
     expect(cfg.enforcement?.mode).toBe("enforced");
+  });
+
+  it("state.reasoningMode wins; cfg.reasoningPolicy is created if missing", async () => {
+    clearGlobal();
+    clearLocal();
+    await saveReasoningMode("manual");
+    const cfg = await readMergedConfig({ cwd: process.cwd() });
+    expect(cfg.reasoningPolicy?.mode).toBe("manual");
+  });
+
+  it("state.reasoningMode 'static' wins over manual reasoningPolicy.mode 'manual'", async () => {
+    // Bundled reasoningPolicy.mode is "manual"; an overlay of "static" must
+    // flip it on the next read.
+    clearGlobal();
+    clearLocal();
+    await saveReasoningMode("static");
+    const cfg = await readMergedConfig({ cwd: process.cwd() });
+    expect(cfg.reasoningPolicy?.mode).toBe("static");
+  });
+
+  it("state.reasoningMode wins over a local reasoningPolicy.mode override", async () => {
+    clearGlobal();
+    stageLocal({ reasoningPolicy: { mode: "manual" } });
+    // Bundled default is "manual"; overlay with "static" must win.
+    await saveReasoningMode("static");
+    const cfg = await readMergedConfig({ cwd: process.cwd() });
+    expect(cfg.reasoningPolicy?.mode).toBe("static");
+  });
+
+  it("missing state.reasoningMode keeps the bundled reasoningPolicy.mode", async () => {
+    // Restart scenario: no overlay is persisted, so the bundled value
+    // (manual) survives untouched.
+    clearGlobal();
+    clearLocal();
+    const cfg = await readMergedConfig({ cwd: process.cwd() });
+    expect(cfg.reasoningPolicy?.mode).toBe("manual");
+  });
+
+  it("missing state.reasoningMode keeps a local reasoningPolicy.mode override", async () => {
+    clearGlobal();
+    stageLocal({ reasoningPolicy: { mode: "static" } });
+    // No saveReasoningMode call — the local manual override survives.
+    const cfg = await readMergedConfig({ cwd: process.cwd() });
+    expect(cfg.reasoningPolicy?.mode).toBe("static");
+  });
+
+  it("invalid reasoningMode in raw state file is ignored", async () => {
+    clearGlobal();
+    clearLocal();
+    mkdirSync(join(tmpHome, ".config", "opencode"), { recursive: true });
+    writeFileSync(
+      join(tmpHome, ".config", "opencode", "opencode-model-router.state.json"),
+      JSON.stringify({ reasoningMode: "adaptive" }),
+      "utf-8",
+    );
+    // 'adaptive' is not in the persisted overlay's allowed set; the
+    // overlay must skip it and the bundled value (manual) must survive.
+    const cfg = await readMergedConfig({ cwd: process.cwd() });
+    expect(cfg.reasoningPolicy?.mode).toBe("manual");
   });
 
   it("manual activePreset is preserved when no state is written", async () => {
