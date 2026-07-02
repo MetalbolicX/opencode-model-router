@@ -74,6 +74,144 @@ describe("resolveReasoningOverride — static mode (regression guard)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// resolveReasoningOverride — unknown mode values fail soft to null
+//
+// The TypeScript union is `"static" | "manual" | "adaptive"`, but runtime
+// config can drift (hand-edited files, partial migrations). The resolver
+// MUST treat any other `mode` value as a no-op — adaptive selection MUST
+// NOT execute, and a session override MUST NOT be honoured. The cast in
+// the helper below is the entire point of this block: the tests prove the
+// fail-soft behaviour without changing the public type signature.
+// ---------------------------------------------------------------------------
+
+describe("resolveReasoningOverride — unknown mode (fail-soft)", () => {
+  /**
+   * Build a policy whose `mode` is `unknown`. Required because the public
+   * type union forbids values like `"adaptive-typo"`; the runtime guard
+   * under test exists specifically for those.
+   */
+  const policyWithRawMode = (mode: unknown, adaptive?: unknown): ReasoningPolicyConfig =>
+    ({
+      mode,
+      ...(adaptive !== undefined
+        ? { adaptive: adaptive as ReasoningPolicyConfig["adaptive"] }
+        : {}),
+    }) as unknown as ReasoningPolicyConfig;
+
+  const binaryTier = baseTier({ variant: "thinking" });
+
+  it("returns null for a typo'd mode value ('adaptive-typo')", () => {
+    const policy = policyWithRawMode("adaptive-typo");
+    expect(resolveReasoningOverride(binaryTier, policy, "elevated", emptySignals)).toBeNull();
+  });
+
+  it("returns null for an arbitrary unknown string ('auto')", () => {
+    const policy = policyWithRawMode("auto");
+    expect(resolveReasoningOverride(binaryTier, policy, "elevated", emptySignals)).toBeNull();
+  });
+
+  it("returns null for the empty string", () => {
+    const policy = policyWithRawMode("");
+    expect(resolveReasoningOverride(binaryTier, policy, "elevated", emptySignals)).toBeNull();
+  });
+
+  it("ignores a session override under an unknown mode (matches static semantics)", () => {
+    // Unknown mode must behave like static: even with a stored override the
+    // resolver leaves the agent def at baseline. This is the asymmetry that
+    // protects against silent escalation from a typo'd config.
+    const policy = policyWithRawMode("adaptive-typo");
+    expect(resolveReasoningOverride(binaryTier, policy, "max", emptySignals)).toBeNull();
+    expect(resolveReasoningOverride(binaryTier, policy, "elevated", emptySignals)).toBeNull();
+  });
+
+  it("never invokes adaptive selection for an unknown mode", () => {
+    // Strong proof: the policy contains an adaptive block that WOULD match
+    // if consulted (keyword "refactor" present in the prompt), AND the
+    // tier's capability can translate the resolved level. A non-null
+    // return would mean the selector ran — which must never happen for
+    // unknown modes.
+    const policy = policyWithRawMode("adaptive-typo", {
+      keywordRules: [{ keywords: ["refactor"], level: "max" }],
+    });
+    const signals = adaptiveSignals({ prompt: "please refactor this" });
+    expect(resolveReasoningOverride(binaryTier, policy, undefined, signals)).toBeNull();
+  });
+
+  it("unknown mode falls back to null even when a defaultLevel is set", () => {
+    // Default-level safety net must NOT rescue an unknown mode — the gate
+    // runs before the adaptive precedence chain.
+    const policy = policyWithRawMode("foo", {}) as ReasoningPolicyConfig;
+    (policy as { defaultLevel?: string }).defaultLevel = "max";
+    expect(resolveReasoningOverride(binaryTier, policy, undefined, emptySignals)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: static / manual / valid-adaptive paths remain unchanged
+//
+// These pin down the precedence comments that were corrected alongside the
+// fail-soft work. The static / manual / adaptive branches have not moved;
+// only the unknown-mode gate was added between `manual` and `adaptive`.
+// ---------------------------------------------------------------------------
+
+describe("resolveReasoningOverride — existing precedence is preserved", () => {
+  const discreteTier = baseTier({ reasoning: { effort: "high" } });
+
+  it("static still wins before any other branch", () => {
+    expect(
+      resolveReasoningOverride(discreteTier, { mode: "static" }, "elevated", emptySignals),
+    ).toBeNull();
+  });
+
+  it("manual still applies sessionOverride ?? defaultLevel", () => {
+    // discrete / reasoning.effort ladder is ["low","medium","high"], so
+    // `elevated` maps to "medium" (rank 2/3 rounds to index 1). This pins
+    // down the manual branch has not drifted after the unknown-mode gate
+    // was added.
+    expect(
+      resolveReasoningOverride(
+        discreteTier,
+        { mode: "manual", defaultLevel: "elevated" },
+        undefined,
+        emptySignals,
+      ),
+    ).toEqual({ options: { reasoning_effort: "medium" } });
+  });
+
+  it("valid adaptive mode still routes through the selector", () => {
+    const policy: ReasoningPolicyConfig = {
+      mode: "adaptive",
+      adaptive: { keywordRules: [{ keywords: ["refactor"], level: "max" }] },
+    };
+    const signals = adaptiveSignals({ prompt: "please refactor this" });
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, signals)).toEqual({
+      options: { reasoning_effort: "high" },
+    });
+  });
+
+  it("tierDefaults still wins over keywordRules in valid adaptive mode (precedence comment truth)", () => {
+    // Pins the doc-comment fix: tierDefaults is evaluated before keywordRules,
+    // so it wins even when a keyword rule matches.
+    const policy: ReasoningPolicyConfig = {
+      mode: "adaptive",
+      adaptive: {
+        defaultLevel: "minimal",
+        tierDefaults: { medium: "max" },
+        keywordRules: [{ keywords: ["refactor"], level: "elevated" }],
+      },
+    };
+    const signals = adaptiveSignals({
+      tierName: "medium",
+      prompt: "please refactor this",
+    });
+    // max on discrete → reasoning_effort: "high" (NOT elevated's "medium")
+    expect(resolveReasoningOverride(discreteTier, policy, undefined, signals)).toEqual({
+      options: { reasoning_effort: "high" },
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // resolveReasoningOverride — manual mode applies the override (or default)
 // ---------------------------------------------------------------------------
 

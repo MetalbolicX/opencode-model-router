@@ -85,6 +85,14 @@ export const resolveReasoningOverride = (
     return translateLevel(cap, level);
   }
 
+  // Unknown mode gate (fail-soft): any mode value that is not exactly one
+  // of the three recognized modes (`static` / `manual` / `adaptive`) MUST
+  // resolve to null. This catches typos (e.g. `"adaptive-typo"`) and any
+  // future-unknown string BEFORE adaptive selection runs, so a malformed
+  // config can never silently elevate reasoning. Adding a new mode requires
+  // touching this gate so the call site cannot drift past it unnoticed.
+  if (mode !== "adaptive") return null;
+
   // mode === "adaptive"
   // Precedence (highest first; mirroring the file header):
   //   1. explicit `sessionOverride` (always wins)

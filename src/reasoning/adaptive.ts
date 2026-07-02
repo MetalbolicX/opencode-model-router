@@ -96,10 +96,21 @@ export const selectAdaptiveLevel = (
   const keywordRules = adaptive.keywordRules;
   if (keywordRules) {
     for (const rule of keywordRules) {
+      // Fail-soft guard: skip rules with a missing or non-array `keywords`
+      // field without throwing. The TypeScript type is `string[]`, but
+      // runtime config can drift (hand-edited files, partial migrations),
+      // and the spec requires malformed rules to be skipped — never raised.
+      if (!Array.isArray(rule?.keywords)) continue;
+
       // First keyword to hit wins; this preserves the design's "first match
       // wins" contract without scanning the rest of the rule's keywords.
+      // The inner `typeof kw === "string"` check is a parallel fail-soft
+      // guard: a non-string entry inside `keywords` would otherwise throw
+      // on `String.prototype.includes`. Such entries are simply non-matching.
       const matched = rule.keywords.find(
-        (kw) => signals.prompt.includes(kw) || signals.description.includes(kw),
+        (kw) =>
+          typeof kw === "string" &&
+          (signals.prompt.includes(kw) || signals.description.includes(kw)),
       );
       if (matched !== undefined) {
         return { level: rule.level, reason: `keyword match: ${matched}` };

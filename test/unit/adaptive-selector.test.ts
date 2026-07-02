@@ -271,6 +271,124 @@ describe("selectAdaptiveLevel — keywordRules priority", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Branch 4b — malformed keywordRules entries are skipped silently (fail-soft)
+//
+// The TypeScript type declares `keywords: string[]`, but runtime config can
+// drift (hand-edited files, partial migrations, JSON coming from an external
+// preset). The spec mandates these shapes be treated as non-matching rules:
+// they MUST NOT throw, MUST NOT change valid `surfaceDecision` reasons for
+// other rules, and MUST NOT prevent a later valid rule from matching.
+// ---------------------------------------------------------------------------
+
+describe("selectAdaptiveLevel — malformed keyword rules (fail-soft)", () => {
+  /**
+   * Build a policy whose `keywordRules` are typed as `unknown` so the
+   * inner literals escape the contextual `string[]` check. All malformed
+   * test cases use this — every assertion below would fail with a TypeError
+   * on the unhardened selector, proving the guard does its job.
+   */
+  const policyWithRawRules = (
+    keywordRules: unknown,
+    extra: AdaptivePolicyConfig = {},
+  ): ReasoningPolicyConfig => {
+    const adaptive = { ...extra, keywordRules } as unknown as AdaptivePolicyConfig;
+    return { mode: "adaptive", adaptive };
+  };
+
+  it("skips a rule whose `keywords` field is missing without throwing", () => {
+    const policy = policyWithRawRules([{ keywords: undefined, level: "max" }]);
+    const signals = { ...baseSignals, prompt: "implement a button" };
+    expect(() => selectAdaptiveLevel(signals, policy)).not.toThrow();
+    expect(selectAdaptiveLevel(signals, policy).level).toBeNull();
+  });
+
+  it("skips a rule whose `keywords` is a string (non-array)", () => {
+    const policy = policyWithRawRules([{ keywords: "refactor", level: "max" }]);
+    const signals = { ...baseSignals, prompt: "refactor this" };
+    expect(() => selectAdaptiveLevel(signals, policy)).not.toThrow();
+    expect(selectAdaptiveLevel(signals, policy).level).toBeNull();
+  });
+
+  it("skips a rule whose `keywords` is null", () => {
+    const policy = policyWithRawRules([{ keywords: null, level: "max" }]);
+    const signals = { ...baseSignals, prompt: "implement a button" };
+    expect(() => selectAdaptiveLevel(signals, policy)).not.toThrow();
+    expect(selectAdaptiveLevel(signals, policy).level).toBeNull();
+  });
+
+  it("skips a rule whose `keywords` is an object (non-array)", () => {
+    const policy = policyWithRawRules([{ keywords: { refactor: true }, level: "max" }]);
+    const signals = { ...baseSignals, prompt: "refactor this" };
+    expect(() => selectAdaptiveLevel(signals, policy)).not.toThrow();
+    expect(selectAdaptiveLevel(signals, policy).level).toBeNull();
+  });
+
+  it("skips non-string entries inside `keywords` without throwing", () => {
+    // 42 and true are valid array entries but not strings; without the
+    // inner guard, `String.prototype.includes(42)` would throw.
+    const policy = policyWithRawRules([
+      { keywords: [42, true, null, "refactor"], level: "elevated" },
+    ]);
+    const signals = { ...baseSignals, prompt: "refactor this" };
+    expect(() => selectAdaptiveLevel(signals, policy)).not.toThrow();
+    // The valid string "refactor" is still matched — non-string entries
+    // are simply non-matching within the same rule.
+    expect(selectAdaptiveLevel(signals, policy).level).toBe("elevated");
+  });
+
+  it("a malformed rule BEFORE a valid matching rule does NOT block the valid rule", () => {
+    // This is the spec scenario: "malformed keyword rule is skipped".
+    // The malformed rule must be silently dropped so the later valid
+    // match is applied.
+    const policy = policyWithRawRules([
+      { keywords: undefined, level: "max" }, // malformed — must skip
+      { keywords: ["refactor"], level: "elevated" }, // valid — must apply
+    ]);
+    const signals = { ...baseSignals, prompt: "refactor this" };
+    expect(() => selectAdaptiveLevel(signals, policy)).not.toThrow();
+    expect(selectAdaptiveLevel(signals, policy).level).toBe("elevated");
+  });
+
+  it("a malformed rule AFTER a valid matching rule does NOT prevent the valid rule from winning", () => {
+    // Regression: the guard must run per-rule, not before the whole loop,
+    // so a later malformed rule cannot poison an earlier valid match.
+    const policy = policyWithRawRules([
+      { keywords: ["refactor"], level: "elevated" }, // valid — first match wins
+      { keywords: "not-an-array", level: "minimal" }, // malformed — must skip
+    ]);
+    const signals = { ...baseSignals, prompt: "refactor this" };
+    expect(() => selectAdaptiveLevel(signals, policy)).not.toThrow();
+    expect(selectAdaptiveLevel(signals, policy).level).toBe("elevated");
+  });
+
+  it("falls through to defaultLevel when every keyword rule is malformed", () => {
+    const policy = policyWithRawRules(
+      [
+        { keywords: undefined, level: "max" },
+        { keywords: "refactor", level: "elevated" },
+        { keywords: [42, true], level: "elevated" },
+      ],
+      { defaultLevel: "normal" },
+    );
+    const signals = { ...baseSignals, prompt: "refactor this" };
+    expect(() => selectAdaptiveLevel(signals, policy)).not.toThrow();
+    expect(selectAdaptiveLevel(signals, policy).level).toBe("normal");
+  });
+
+  it("preserves the decision reason of the still-valid matching rule (no reason text drift)", () => {
+    // Spec requirement: malformed rules MUST NOT change `surfaceDecision`
+    // behaviour for valid rules. The matched-keyword reason must remain
+    // exactly "keyword match: <kw>" — no mention of skipped malformed rules.
+    const policy = policyWithRawRules([
+      { keywords: undefined, level: "max" },
+      { keywords: ["refactor"], level: "elevated" },
+    ]);
+    const signals = { ...baseSignals, prompt: "refactor this" };
+    expect(selectAdaptiveLevel(signals, policy).reason).toBe("keyword match: refactor");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Branch 5 — fallthrough to defaultLevel
 // ---------------------------------------------------------------------------
 

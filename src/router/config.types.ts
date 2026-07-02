@@ -114,7 +114,9 @@ export interface AdaptiveKeywordRule {
  *   keyword rule. Same null/undefined semantics as `trivialLevel`.
  * - `keywordRules` are evaluated in array order; first match wins.
  * - `tierDefaults` lets operators pin a level per tier name. A tier default
- *   wins over `defaultLevel` but loses to `trivialLevel` and `keywordRules`.
+ *   wins over `keywordRules` and `defaultLevel`, losing only to
+ *   `trivialLevel` (decision order: trivial → tierDefault → keywordRules
+ *   → defaultLevel).
  * - `surfaceDecision` opts into debug logs describing every adaptive
  *   decision (selected level + reason). Off by default — production should
  *   leave it `false` to avoid log noise.
@@ -131,8 +133,8 @@ export interface AdaptivePolicyConfig {
   /** Keyword rules: case-insensitive substring match in prompt OR description.
    *  First match wins (array order = priority). */
   keywordRules?: AdaptiveKeywordRule[];
-  /** Per-tier default override. Keyed by tier name. Wins over `defaultLevel`,
-   *  loses to `trivialLevel` and `keywordRules`. */
+  /** Per-tier default override. Keyed by tier name. Wins over `keywordRules`
+   *  and `defaultLevel`, loses only to `trivialLevel`. */
   tierDefaults?: Record<string, import("../reasoning/capability.js").ReasoningLevel>;
   /** When true, emit a debug log for every adaptive decision (level + reason). */
   surfaceDecision?: boolean;
