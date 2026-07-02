@@ -8,7 +8,7 @@ The router exposes a provider-agnostic way to control how much each subagent rea
 
 Pre-Plan-010 tier configs continue to work: capability is **inferred** from existing fields (`variant`, `reasoning.effort`, `thinking.budgetTokens`) when no explicit declaration is present. The bundled presets now declare capability explicitly — see [Capability declarations](#capability-declarations) — so inference is a safety net, not the primary path.
 
-**Cross-references:** [CONFIG_REFERENCE.md → `reasoningPolicy`](./CONFIG_REFERENCE.md#reasoningpolicy) · [Capability declarations](#capability-declarations) · [`/model-router-reasoning` command](#model-router-reasoning-command) · [Policy modes](#policy-modes-reasoningpolicy) · [Backward compatibility](#backward-compatibility) · [`surfaceLimits`](#surfacelimits)
+**Cross-references:** [CONFIG_REFERENCE.md → `reasoningPolicy`](./CONFIG_REFERENCE.md#reasoningpolicy) · [Capability declarations](#capability-declarations) · [Policy modes](#policy-modes-reasoningpolicy) · [Adaptive mode](#adaptive-mode) · [`/model-router-reasoning` command](#model-router-reasoning-command) · [Backward compatibility](#backward-compatibility) · [`surfaceLimits`](#surfacelimits)
 
 ---
 
@@ -107,8 +107,8 @@ type ReasoningCapability =
 | Mode | Behaviour | Use it for |
 |---|---|---|
 | `static` _(default when `reasoningPolicy` is absent)_ | Always returns `null` from the policy resolver. `static` is a hard no-op: even if a session override exists, the agent def is left exactly as `registerTierAgents` produced it. | Pre-Plan-010 configs. Anyone who wants byte-identical behaviour to today. |
-| `manual` | Translates `sessionOverride ?? policy.defaultLevel` through the tier's capability. When the override is `undefined` and no `defaultLevel` is configured, returns `null` (silent no-op). | `/model-router-reasoning` driven overrides. This is the **bundled default** as of Plan 010 PR 3, and the **only mode this release ships with runtime mode switching**. |
-| `adaptive` | **Deferred.** The mode name is reserved in the type union and `applyStateOverlay` rejects it at the config-overlay boundary. No adaptive engine exists yet, and `/model-router-reasoning mode adaptive` is rejected with a clear "not implemented yet" message. | Do not use today. When the engine ships, `/model-router-reasoning mode adaptive` will accept the value and a follow-up plan will document the routing signals. |
+| `manual` | Translates `sessionOverride ?? policy.defaultLevel` through the tier's capability. When the override is `undefined` and no `defaultLevel` is configured, returns `null` (silent no-op). | `/model-router-reasoning` driven overrides. The **bundled default** as of Plan 010 PR 3, and the mode this release ships with runtime mode switching (`static` and `adaptive` also persist via `mode`). |
+| `adaptive` | Picks a level from real task signals via `selectAdaptiveLevel()`. Decision order: `trivialLevel` → `tierDefaults[tierName]` → first-matching `keywordRules` rule → `defaultLevel` → `null` (no patch). An explicit session override always wins over the selector. See [Adaptive mode](#adaptive-mode) for the full contract and what the selector does **not** consider (no history, no token usage, no cross-session learning). | Per-session overrides are still honoured (`/model-router-reasoning elevated`) and beat the selector. Opt in with `/model-router-reasoning mode adaptive`. |
 
 `surfaceLimits` defaults to `false`. See [below](#surfacelimits).
 
@@ -134,10 +134,95 @@ The bundled default of `manual` mode is fine for most users, but operators who n
 ```bash
 /model-router-reasoning mode manual   # enables per-session override flow (default)
 /model-router-reasoning mode static   # disables it; tiers render at their declared baseline
-/model-router-reasoning mode adaptive # rejected — see the adaptive row above
+/model-router-reasoning mode adaptive # opts in to the selector — see [Adaptive mode](#adaptive-mode)
 ```
 
 The `mode` subcommand writes `reasoningMode` into the router state overlay via `saveReasoningMode()`, which is the same persistence path used by `/router enforce`. The next config refresh — the one the `command.execute.before` hook calls through `getFreshConfig()` — picks the new mode up and honors it on the next `task` dispatch. There is no per-session override for the policy mode; the value is global to the workspace.
+
+### Adaptive mode
+
+`adaptive` is a **deterministic, config-driven selector** (`src/reasoning/adaptive.ts`) — not an LLM inference and not a learned model. Given the same signals and policy, it returns the same decision every time. The selector is pure: no IO, no module state, no side effects, fully covered by `test/unit/adaptive-selector.test.ts`. Every decision is reproducible and operator-configurable.
+
+#### Signal inputs (every dispatch)
+
+The runtime extracts these from the Task-tool args at `tool.execute.before` (see `src/plugin/hooks.ts:154-163`) and threads them into `selectAdaptiveLevel()` as `AdaptiveSignals`:
+
+| Signal | Source | Note |
+|---|---|---|
+| `prompt` | `args.prompt` from the built-in `task` tool | Lowercased by the caller. Keyword matching is case-insensitive substring on already-normalised text. May be empty. |
+| `description` | `args.description` from the built-in `task` tool | Lowercased by the caller. May be empty. |
+| `tierName` | `args.subagent_type` (e.g. `"medium"`, `"heavy"`) | Looked up against `reasoningPolicy.adaptive.tierDefaults`. |
+| `isTrivial` | `ctx.sessionStore.isTrivial(sessionID)` | The dispatch-time trivial classification result. |
+
+#### Decision order (first match wins)
+
+The selector runs the steps below in order and stops at the first match. `null` at any step means "no patch" — the agent def is left at baseline.
+
+1. `reasoningPolicy.adaptive` is absent → `null` (no adaptive config). This is the same effective behaviour as `static` mode for an unprepared config.
+2. `signals.isTrivial === true` → `adaptive.trivialLevel` (or `null` if unset → no patch for trivial sessions).
+3. `adaptive.tierDefaults[signals.tierName]` is set → that level.
+4. `adaptive.keywordRules` scanned in array order — first rule whose keywords (case-insensitive substring) match in `prompt` OR `description` wins.
+5. `adaptive.defaultLevel` (or `null` if unset → no patch).
+6. Fall-through to `null` (no patch).
+
+Every resolved level is then passed through `translateLevel(cap, level)` in `policy.ts`, so capability gating still applies — adaptive only picks the **normalized level**, not the provider-specific patch. A `none`-capability tier, a `binary` capability without a baseline for a low-rank level, etc., all still resolve to `null` through the same translator the other modes use.
+
+#### Precedence under adaptive mode
+
+When `mode === "adaptive"` the resolver consults inputs in this order (highest first):
+
+1. **Explicit session override** (`/model-router-reasoning minimal|normal|elevated|max` → `ctx.reasoningStore.get(sessionID)`) — **always wins**, regardless of selector output. Operators need certainty when they set an override manually.
+2. `selectAdaptiveLevel(signals, policy)` result.
+3. `policy.defaultLevel` as a safety net.
+4. `null` (no patch).
+
+This precedence is mirrored in the file header of `src/reasoning/policy.ts` and exercised by `test/unit/reasoning-policy.test.ts` (the `adaptive-mode delegates to selectAdaptiveLevel` describe block).
+
+#### Config block
+
+```jsonc
+"reasoningPolicy": {
+  "mode": "adaptive",
+  "defaultLevel": "normal",
+  "adaptive": {
+    "trivialLevel": null,                                    // null → skip trivial sessions entirely
+    "defaultLevel": "normal",                                 // catch-all for non-trivial tasks with no keyword match
+    "keywordRules": [
+      { "keywords": ["refactor", "architecture", "security", "migration"], "level": "elevated" },
+      { "keywords": ["debug", "diagnose", "investigate", "root cause"], "level": "elevated" },
+      { "keywords": ["test", "fix", "patch"], "level": "normal" }
+    ],
+    "tierDefaults": { "fast": "minimal" },                    // optional: pin a level per tier, wins over defaultLevel
+    "surfaceDecision": false                                  // debug-log every adaptive decision when true
+  }
+}
+```
+
+All fields are optional — a partial block is a valid config. `null` on `trivialLevel` / `defaultLevel` is a valid value (means "no patch"). Order matters in `keywordRules`: the **first** rule whose keywords match wins, so high-precision rules MUST come before catch-alls. The shipped `config/tiers/base.json` carries the conservative defaults above with `mode: "manual"` so existing installs behave unchanged until operators opt in.
+
+#### What adaptive does NOT consider (yet)
+
+The shipped selector is deliberately minimal. It does not consult any of:
+
+- **Conversation history** — only the current task's `prompt` + `description`. Past turns, the user's prior preferences, and the conversation thread are not in scope.
+- **Token usage** — no budget tracking, no cost ledger, no "you've used a lot so far" feedback. The `tierCaps` map in `base.json` is enforced separately by the `tool.execute.after` banner; it is not an adaptive signal.
+- **Cross-session learning** — every dispatch is decided independently. There is no stored history of past decisions, no per-tier model, no analytics.
+- **Tool-call counts in the same session** — the trivial classifier used at dispatch time is the only session-state signal read. The router does not remember what the previous dispatch decided.
+- **The level chosen by previous dispatches in the same session** — adaptive is dispatch-by-dispatch, not cumulative. There is no escalation ladder that builds on prior calls.
+
+A future plan can extend `AdaptiveSignals` and add new decision branches without touching the runtime call site (the selector is pure). Today, if you need any of the above signals, switch to `manual` mode and use `/model-router-reasoning <level>` directly per dispatch.
+
+#### Forcing manual control (workarounds)
+
+There are three ways to override the selector — for a single dispatch, for one tier, or for the whole workspace:
+
+- **Per-session, single dispatch.** Set an override before dispatching: `/model-router-reasoning elevated`. The override wins for the next `task` call in this session; clear with `/model-router-reasoning off`. The override applies to all tiers in that session, not just one.
+- **Per-tier pinning.** Add the tier name to `reasoningPolicy.adaptive.tierDefaults` — that tier's level is decided by the table, not by keywords or the trivial classifier. Useful for pinning `@fast` to `minimal` (no selector overhead on cheap lookups) or `@heavy` to `elevated` (always reason harder on heavy dispatch).
+- **Disable adaptive globally.** `/model-router-reasoning mode static` — restores pre-Plan-015 byte-identical behaviour (no patches ever). Or `/model-router-reasoning mode manual` — keeps the per-session override surface but disables automatic selection. Both persist through `saveReasoningMode()`.
+
+#### Opt-in observability
+
+Set `reasoningPolicy.adaptive.surfaceDecision` to `true` to emit `log.debug({ event: "reasoning.adaptive_selected", session, tier, level, reason })` on every dispatch under `adaptive` mode. `reason` is a short machine-friendly string (`"trivial"`, `"tier default: heavy"`, `"keyword match: refactor"`, `"default level"`, `"no adaptive config"`) so operators can correlate what each dispatch decided without re-running the selector. Off by default — leave it `false` for production to avoid log noise. Independent from `reasoningPolicy.surfaceLimits`, which controls the `reasoning.patch_applied` / `reasoning.patch_unsupported` events emitted at `src/plugin/hooks.ts:170-188`.
 
 ---
 
@@ -146,7 +231,7 @@ The `mode` subcommand writes `reasoningMode` into the router state overlay via `
 The `/model-router-reasoning` command is the user-facing entry point. It has two distinct surfaces, separated by the `mode` subcommand:
 
 - **Level overrides** (`minimal` / `normal` / `elevated` / `max` / `off`) set a **session-scoped** override on `ctx.reasoningStore`. The override applies to the next `task` dispatch in this session only and is cleared by `off`.
-- **Mode switching** (`mode static` / `mode manual`) **persists** a new policy-mode value through the router state overlay (`saveReasoningMode`). The change is global to the workspace and survives restarts — it is NOT session-scoped.
+- **Mode switching** (`mode static` / `mode manual` / `mode adaptive`) **persists** a new policy-mode value through the router state overlay (`saveReasoningMode`). The change is global to the workspace and survives restarts — it is NOT session-scoped. `mode adaptive` opts in to the selector described under [Adaptive mode](#adaptive-mode); `mode static` and `mode manual` preserve their pre-Plan-015 semantics.
 
 ### Usage
 
@@ -161,7 +246,7 @@ The `/model-router-reasoning` command is the user-facing entry point. It has two
 | `/model-router-reasoning mode` | Print the current persisted policy mode + usage. |
 | `/model-router-reasoning mode static` | **Persist** `mode: "static"` to the state overlay; takes effect on the next config refresh. |
 | `/model-router-reasoning mode manual` | **Persist** `mode: "manual"` to the state overlay; takes effect on the next config refresh. |
-| `/model-router-reasoning mode adaptive` | Reject: `adaptive is not implemented yet.` See [Policy modes](#policy-modes-reasoningpolicy). |
+| `/model-router-reasoning mode adaptive` | **Persist** `mode: "adaptive"` to the state overlay; the selector described under [Adaptive mode](#adaptive-mode) takes effect on the next config refresh. Per-session overrides still win over the selector. |
 | `/model-router-reasoning foo` | Reject: `Unknown level: "foo". Use one of: minimal, normal, elevated, max (or "off" to clear). Run '/model-router-reasoning mode' to switch the policy.` |
 
 The level override applies to the **next `task` dispatch in this session only**. The runtime hooks restore the baseline tier config in `tool.execute.after`, so a session override does not leak to subsequent dispatches or to other sessions. The persisted mode, by contrast, applies to every dispatch that loads the config from that point on — until another `mode` call (or a manual edit to the state file) changes it again.
@@ -284,25 +369,26 @@ The collapse is intentional: it matches the discrete-ladder spec. The `/model-ro
 
 - `budgeted` capability is supported by the translator but **not declared** on any bundled tier today. Declaring it on a tier requires both `field: "thinking.budgetTokens"` and a `recommended` map covering all four normalized levels.
 - The bundled default mode is `manual`, which means `/model-router-reasoning` works out of the box. Set `reasoningPolicy.mode` to `static` to restore the pre-Plan-010 byte-identical behaviour.
-- The `adaptive` mode is **deferred in this release**. It is reserved in the type union, the state overlay rejects it at the boundary, and `/model-router-reasoning mode adaptive` is rejected with a clear "not implemented yet" message. The production release ships **manual-mode reasoning control only**. A follow-up plan will introduce the adaptive engine and the routing signals it consumes.
+- The `adaptive` mode is **available as an opt-in** as of Plan 015. The bundled `config/tiers/base.json` ships a conservative adaptive block (`defaultLevel: "normal"`, three keyword groups, no per-tier pin) but keeps `mode: "manual"` as the default so existing installs behave unchanged until operators run `/model-router-reasoning mode adaptive`. The shipped selector is intentionally minimal — no history, no token usage, no cross-session learning; see [Adaptive mode](#adaptive-mode) for the full contract and the workaround list.
 
 ---
 
 ## Verification
 
-Per [plans/010-adaptive-reasoning.md](../../plans/010-adaptive-reasoning.md):
+Per [plans/010-adaptive-reasoning.md](../../plans/010-adaptive-reasoning.md) (infrastructure) and [plans/015-adaptive-reasoning-engine.md](../../plans/015-adaptive-reasoning-engine.md) (selector engine):
 
 | Layer | Tests |
 |---|---|
 | Unit — inference | `test/unit/reasoning-capability.test.ts` — all 4 shapes incl. positional-vs-named variant split. |
 | Unit — translation | `test/unit/reasoning-translate.test.ts` — every capability × level; `none` always `null`; 2-level discrete clamping; field routing. |
-| Unit — policy | `test/unit/reasoning-policy.test.ts` — `static` ALWAYS null; `manual`+override applies; `surfaceLimits` does NOT alter resolved patch. |
-| Unit — agent wiring | `test/unit/router-agents.test.ts` — `applyReasoningPatch` + `restoreAgentBaseline` round-trip; `none`-capability NEVER mutated. |
-| Unit — command | `test/unit/router-commands.test.ts` — `/model-router-reasoning` validates level, persists `mode`, rejects `adaptive`, sets/clears store, names capability. |
-| Unit — hooks | `test/unit/plugin-hooks.test.ts` — `handleConfig` captures baseline; `tool.execute.before/after` patch/restore. |
+| Unit — adaptive selector | `test/unit/adaptive-selector.test.ts` — every `selectAdaptiveLevel` branch: no-config → `null`; trivial; tierDefaults; keyword priority (first match wins); case-insensitivity; description-only match; default fallback; empty inputs; deterministic. |
+| Unit — policy | `test/unit/reasoning-policy.test.ts` — `static` ALWAYS null; `manual`+override applies; `adaptive` precedence (session override wins → selector → `defaultLevel` → null); `surfaceLimits` does NOT alter resolved patch. |
+| Unit — agent wiring | `test/unit/router-agents.test.ts` — `applyReasoningPatch` + `restoreAgentBaseline` round-trip; `none`-capability NEVER mutated; `resolveReasoningOverride` accepts the new 4-param `signals` argument. |
+| Unit — command | `test/unit/router-commands.test.ts` — `/model-router-reasoning` validates level, persists `mode static|manual|adaptive`, sets/clears store, names capability. |
+| Unit — hooks | `test/unit/plugin-hooks.test.ts` — `handleConfig` captures baseline; `tool.execute.before/after` patch/restore; under `mode: "adaptive"`, threads `AdaptiveSignals` into the resolver and emits `reasoning.adaptive_selected` when `surfaceDecision: true`. |
 
 Run:
 
 ```bash
-pnpm test -- reasoning router-agents router-commands plugin-hooks
+pnpm test -- adaptive-selector reasoning router-agents router-commands plugin-hooks
 ```
